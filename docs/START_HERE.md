@@ -52,17 +52,19 @@ ptree.exe --quiet --force
 
 ## Documentation Guide
 
-### Start with one of these:
+### Documentation Guide
 
 **I want to use ptree:**
 → Read **README.md** (5 min)
 
 **I want practical examples:**
-→ Read **NEW_FEATURES_QUICKSTART.md** (10 min)  
+→ Read **USAGE_EXAMPLES.md** (20 min)
+
+**I want colors explained:**
 → Read **COLORED_OUTPUT_QUICKSTART.md** (5 min)
 
-**I want all features explained:**
-→ Read **USAGE_EXAMPLES.md** (20 min)
+**I want detailed feature info:**
+→ Read **COLORED_OUTPUT.md** (15 min)
 
 **I want to understand how it works:**
 → Read **ARCHITECTURE.md** (30 min)
@@ -84,24 +86,16 @@ ptree/
 │
 ├── target/release/ptree.exe      # Compiled binary (920 KB)
 │
-├── QUICK START & REFERENCE
-│   ├── README.md                 ← Start here
-│   ├── NEW_FEATURES_QUICKSTART.md
-│   └── COLORED_OUTPUT_QUICKSTART.md
+├── ROOT DOCS
+│   ├── README.md                 ← Main entry point
+│   ├── ARCHITECTURE.md           ← Design & architecture
+│   └── IMPLEMENTATION_GUIDE.md   ← Code walkthrough
 │
-├── FEATURE GUIDES
-│   ├── COLORED_OUTPUT.md
-│   └── EXPANSION_FEATURES.md
-│
-├── USER GUIDES
-│   ├── USAGE_EXAMPLES.md         ← For practical examples
-│   └── FEATURES_SUMMARY.md       ← Complete feature matrix
-│
-├── TECHNICAL DOCS
-│   ├── ARCHITECTURE.md           ← For understanding design
-│   ├── IMPLEMENTATION_GUIDE.md   ← For modifying code
-│   ├── EXPANSION_SUMMARY.md
-│   └── DELIVERABLES.md
+├── docs/
+│   ├── START_HERE.md             ← Navigation guide (you are here)
+│   ├── COLORED_OUTPUT.md         ← Detailed color feature guide
+│   ├── COLORED_OUTPUT_QUICKSTART.md  ← Quick color reference
+│   └── USAGE_EXAMPLES.md         ← Real-world scenarios
 │
 └── CONFIG
     ├── Cargo.toml                # Project manifest
@@ -212,11 +206,10 @@ ptree.exe --help
 ## Next Steps
 
 1. **Just want to use it?** → Run `ptree.exe`
-2. **Want more features?** → Read `NEW_FEATURES_QUICKSTART.md`
+2. **Want practical examples?** → Read `USAGE_EXAMPLES.md`
 3. **Want colors explained?** → Read `COLORED_OUTPUT_QUICKSTART.md`
-4. **Want all details?** → Read `FEATURES_SUMMARY.md`
-5. **Want to understand design?** → Read `ARCHITECTURE.md`
-6. **Want to modify code?** → Read `IMPLEMENTATION_GUIDE.md`
+4. **Want to understand design?** → Read `ARCHITECTURE.md`
+5. **Want to modify code?** → Read `IMPLEMENTATION_GUIDE.md`
 
 ## Quick Reference
 
