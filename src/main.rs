@@ -94,11 +94,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Format duration in both milliseconds and microseconds
+/// Format duration in both milliseconds and picoseconds
 fn format_duration(duration: std::time::Duration) -> String {
     let ms = duration.as_secs_f64() * 1000.0;
-    let us = duration.as_secs_f64() * 1_000_000.0;
-    format!("{:.3} MS | {:.3} US", ms, us)
+    let ps = duration.as_secs_f64() * 1_000_000_000_000.0;
+    format!("{:.3} MS | {:.3} PS", ms, ps)
 }
 
 /// Print formatted debug summary
