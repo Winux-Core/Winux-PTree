@@ -73,14 +73,25 @@ pub struct TraversalState {
 /// 7. Spawn worker threads that process queue in parallel (iterative DFS)
 /// 8. Flush all pending writes and save cache atomically
 pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args) -> Result<DebugInfo> {
+    #[cfg(not(windows))]
+    let _ = drive;
+
     // Determine scan root: current directory by default, full drive with --force
     let scan_root = if args.force {
-        // --force: scan full drive
-        let root = PathBuf::from(format!("{}:\\", drive));
-        if !root.exists() {
-            anyhow::bail!("Drive {} does not exist", drive);
+        // --force: scan full filesystem root for the current platform
+        #[cfg(windows)]
+        {
+            let root = PathBuf::from(format!("{}:\\", drive));
+            if !root.exists() {
+                anyhow::bail!("Drive {} does not exist", drive);
+            }
+            root
         }
-        root
+
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/")
+        }
     } else {
         // Default: scan current directory and subdirectories
         std::env::current_dir()?
@@ -177,7 +188,16 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args) -> Result
     // Create Thread Pool & Determine Thread Count
     // ============================================================================
 
-    let num_threads = args.threads.unwrap_or_else(|| num_cpus::get() * 2);
+    let num_threads = args.threads.unwrap_or_else(|| {
+        let cores = num_cpus::get().max(1);
+        if args.force {
+            cores
+        } else {
+            // Normal (non-force) scans are often small and lock-heavy.
+            // Keep default worker count low to reduce contention.
+            cores.min(4)
+        }
+    });
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
@@ -244,13 +264,13 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args) -> Result
         ptree_cache::get_cache_path()?
     };
     
+    let cache_index_elapsed = cache_index_start.elapsed();
+
     let save_start = Instant::now();
     if !args.no_cache {
         cache.save(&cache_path)?;
     }
     let save_elapsed = save_start.elapsed();
-    
-    let cache_index_elapsed = cache_index_start.elapsed();
 
     // ============================================================================
     // Return Debug Info

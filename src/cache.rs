@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use anyhow::Result;
@@ -248,12 +248,12 @@ impl DiskCache {
      /// Save cache in mmap format (index + data files with bincode serialization)
      fn save_as_rkyv_mmap(&self, index_path: &Path, data_path: &Path) -> Result<()> {
          use crate::cache_rkyv::{RkyvDirEntry, RkyvCacheIndex};
-         use std::io::Seek;
          
          fs::create_dir_all(index_path.parent().unwrap())?;
          
          // Build index with byte offsets
          let mut rkyv_index = RkyvCacheIndex::new();
+         rkyv_index.offsets = HashMap::with_capacity(self.entries.len());
          rkyv_index.root = self.root.clone();
          rkyv_index.last_scanned_root = self.last_scanned_root.clone();
          rkyv_index.last_scan = self.last_scan;
@@ -263,7 +263,9 @@ impl DiskCache {
              rkyv_index.usn_state = self.usn_state.clone();
          }
          
-         let mut data_file = File::create(data_path)?;
+         let data_file = File::create(data_path)?;
+         let mut data_file = BufWriter::with_capacity(8 * 1024 * 1024, data_file);
+         let mut offset: u64 = 0;
          
          for (path, entry) in &self.entries {
              let rkyv_entry = RkyvDirEntry {
@@ -279,20 +281,23 @@ impl DiskCache {
              
              let serialized = bincode::serialize(&rkyv_entry)?;
              let len = serialized.len() as u32;
-             let offset = data_file.stream_position()?;
              
              rkyv_index.offsets.insert(path.clone(), offset);
              data_file.write_all(&len.to_le_bytes())?;
              data_file.write_all(&serialized)?;
+             offset += 4 + len as u64;
          }
-         data_file.sync_all()?;
+         data_file.flush()?;
+         drop(data_file);
          
          // Save index
          let index_serialized = bincode::serialize(&rkyv_index)?;
          let temp_path = index_path.with_extension("tmp");
-         let mut index_file = File::create(&temp_path)?;
+         let index_file = File::create(&temp_path)?;
+         let mut index_file = BufWriter::new(index_file);
          index_file.write_all(&index_serialized)?;
-         index_file.sync_all()?;
+         index_file.flush()?;
+         drop(index_file);
          fs::rename(&temp_path, index_path)?;
          
          Ok(())
@@ -672,11 +677,30 @@ impl DiskCache {
 
 /// Get cache directory path
 pub fn get_cache_path() -> Result<PathBuf> {
-    let appdata = std::env::var("APPDATA")?;
-    Ok(PathBuf::from(appdata)
-        .join("ptree")
-        .join("cache")
-        .join("ptree.dat"))
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var("APPDATA")?;
+        return Ok(PathBuf::from(appdata)
+            .join("ptree")
+            .join("cache")
+            .join("ptree.dat"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Ok(cache_home) = std::env::var("XDG_CACHE_HOME") {
+            return Ok(PathBuf::from(cache_home).join("ptree").join("ptree.dat"));
+        }
+
+        if let Ok(home) = std::env::var("HOME") {
+            return Ok(PathBuf::from(home)
+                .join(".cache")
+                .join("ptree")
+                .join("ptree.dat"));
+        }
+
+        Ok(PathBuf::from("/var/cache/ptree/ptree.dat"))
+    }
 }
 
 /// Get cache directory path with custom directory

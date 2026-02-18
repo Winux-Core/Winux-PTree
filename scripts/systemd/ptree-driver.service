@@ -1,0 +1,18 @@
+[Unit]
+Description=PTree filesystem watcher loop
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/ptree-driver
+WorkingDirectory=/
+ExecStart=/usr/local/lib/ptree/ptree-driver-loop.sh
+Restart=always
+RestartSec=2
+Nice=-15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
