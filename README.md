@@ -48,6 +48,36 @@ cargo build --release
 
 The release binary will be at `target/release/ptree`.
 
+### Linux Install (systemd watcher + persistent command)
+
+```bash
+bash scripts/install-linux.sh
+```
+
+This installer will:
+- Build and install `ptree` to `/usr/local/bin/ptree`
+- Install `/usr/local/bin/Ptree` as a command alias symlink
+- Install and enable `ptree-driver.service` with `Nice=-15`
+- Start a continuous filesystem watch loop (via `inotifywait`)
+
+Useful commands:
+
+```bash
+sudo systemctl status ptree-driver.service
+sudo journalctl -u ptree-driver.service -f
+sudo systemctl restart ptree-driver.service
+```
+
+Service configuration file:
+
+```bash
+/etc/default/ptree-driver
+```
+
+Performance tuning:
+- Set `PTREE_THREADS="1"` in `/etc/default/ptree-driver` if your scan roots are small and lock contention outweighs parallelism.
+- Adjust `PTREE_ARGS` (default: `--quiet --cache-ttl 0`) for refresh behavior.
+
 ## Usage
 
 ```bash
@@ -178,14 +208,14 @@ cargo build --release --features scheduler
 
 ### Unix/Linux
 - Basic traversal and caching
-- Cron-based scheduling (future)
+- Cron scheduler support via `ptree --scheduler`
+- Optional always-on systemd watcher via `bash scripts/install-linux.sh`
 - No incremental update support
 
 ## Future Work
 
 - [ ] Fill in performance benchmarks
 - [ ] Implement NTFS/USN/MFT crates
-- [ ] Add Unix cron scheduling
 - [ ] Web UI for visualization
 - [ ] Database export support
 
