@@ -53,7 +53,7 @@ impl std::str::FromStr for ColorMode {
 /// for near-instant subsequent runs.
 #[derive(Parser, Debug)]
 #[command(name = "ptree")]
-#[command(about = "Fast disk tree visualization with incremental caching")]
+#[command(about = "Fast disk tree visualization with persistent caching")]
 pub struct Args {
     // ========================================================================
     // Drive & Scanning Options
@@ -134,14 +134,6 @@ pub struct Args {
     /// Maximum threads (default: physical cores * 2, capped at 3x cores)
     #[arg(short = 'j', long)]
     pub threads: Option<usize>,
-
-    /// Enable incremental updates via USN Journal (Windows only)
-    #[arg(long)]
-    pub incremental: bool,
-
-    // ========================================================================
-    // Output Options
-    // ========================================================================
 
     /// Display summary statistics (total dirs, files, timing, cache location)
     #[arg(long)]

@@ -1,12 +1,11 @@
 # PTree - High-Performance Disk Tree Visualization
 
-A fast, cache-first disk tree traversal tool for Windows and Unix systems with multi-threaded parallelism and incremental caching.
+A fast, cache-first disk tree traversal tool for Windows and Unix systems with multi-threaded parallelism and persistent caching.
 
 ## Features
 
 - **Cache-first design**: Near-instant subsequent runs using persistent cache
 - **Parallel traversal**: Multi-threaded DFS with configurable thread count
-- **Incremental updates**: USN Journal support for change detection (Windows)
 - **Scheduled refreshes**: Automatic cache updates via Windows Task Scheduler or cron
 - **Flexible output**: Tree view or JSON output with configurable depth limiting
 - **Memory-bounded**: Strict O(n) memory usage guarantees (200 bytes per directory)
@@ -22,7 +21,7 @@ ptree (binary)
 ├── ptree-cache      (disk cache, serialization)
 ├── ptree-traversal  (parallel DFS traversal)
 ├── ptree-scheduler  (scheduled refresh)
-└── ptree-incremental (USN Journal updates)
+└── ptree-incremental (planned incremental backend)
 ```
 
 ### Key Components
@@ -31,7 +30,7 @@ ptree (binary)
 - **ptree-cache**: In-memory cache with rkyv-based persistence
 - **ptree-traversal**: Multi-threaded iterative DFS with batching and lock-free optimization
 - **ptree-scheduler**: Task scheduling for automatic cache refresh (30-minute intervals)
-- **ptree-incremental**: USN Journal tracking for incremental updates (Windows only)
+- **ptree-incremental**: Placeholder crate for future incremental updates
 
 ## Building
 
@@ -59,6 +58,9 @@ This installer will:
 - Install `/usr/local/bin/Ptree` as a command alias symlink
 - Install and enable `ptree-driver.service` with `Nice=-15`
 - Start a continuous filesystem watch loop (via `inotifywait`)
+- Install and enable `ptree-auto-update.timer` (pull/build/reinstall automatically)
+- Install a wake hook that triggers update checks after resume
+- On wake update failure, show a one-time egui prompt asking permission to update
 
 Useful commands:
 
@@ -67,6 +69,23 @@ sudo systemctl status ptree-driver.service
 sudo journalctl -u ptree-driver.service -f
 sudo systemctl restart ptree-driver.service
 ```
+
+Update after pulling/changing code:
+
+```bash
+bash scripts/update-driver.sh
+```
+
+Auto-update configuration:
+
+```bash
+/etc/default/ptree-auto-update
+```
+
+XDG notes (user-level paths):
+- Cache defaults to `$XDG_CACHE_HOME/ptree/ptree.dat` (or `~/.cache/ptree/ptree.dat`).
+- Wake prompt one-time marker is stored at `$XDG_STATE_HOME/ptree/update-prompt-shown`
+  (or `~/.local/state/ptree/update-prompt-shown`).
 
 Service configuration file:
 
@@ -123,7 +142,6 @@ OPTIONS:
     -j, --threads <COUNT>            Thread count (default: CPU cores * 2)
     --stats                          Show timing statistics
     --skip-stats                     Show skipped directory statistics
-    --incremental                    Enable incremental updates (USN Journal)
     --scheduler                      Install scheduled cache refresh
     --scheduler-uninstall            Remove scheduled refresh
     --scheduler-status               Check scheduler status
@@ -135,7 +153,8 @@ The cache operates on a time-to-live model:
 
 - **First run**: Full disk scan stored in cache
 - **Subsequent runs**: Cache returned if age < TTL (default 1 hour)
-- **Cache location**: `%APPDATA%\ptree\cache\ptree.dat` (Windows)
+- **Cache location**: `%APPDATA%\ptree\cache\ptree.dat` (Windows),
+  `$XDG_CACHE_HOME/ptree/ptree.dat` or `~/.cache/ptree/ptree.dat` (Linux/Unix)
 - **Cache format**: Rkyv binary with lazy-loading index for O(1) cold start
 - **Force rescan**: Use `--force` flag to bypass cache
 
@@ -189,7 +208,7 @@ cargo bench --bench traversal_benchmarks
 ## Features (Compile-time)
 
 ```bash
-# Default (with scheduler and incremental)
+# Default (with scheduler)
 cargo build --release
 
 # Minimal (cache + traversal only)
@@ -202,7 +221,7 @@ cargo build --release --features scheduler
 ## Platform-Specific Notes
 
 ### Windows
-- Full USN Journal support for incremental updates
+- Incremental USN Journal updates are not yet implemented
 - Windows Task Scheduler integration for scheduled refresh
 - System directory skipping (without `--admin` flag)
 
@@ -211,18 +230,22 @@ cargo build --release --features scheduler
 - Cron scheduler support via `ptree --scheduler`
 - Optional always-on systemd watcher via `bash scripts/install-linux.sh`
 - No incremental update support
+- Auto-update failures on wake can trigger a one-time egui permission prompt
 
 ## Future Work
 
 - [ ] Fill in performance benchmarks
-- [ ] Implement NTFS/USN/MFT crates
+- [ ] Implement incremental NTFS/USN/MFT crates
 - [ ] Web UI for visualization
 - [ ] Database export support
 
 ## License
 
-[Add your license here]
+Licensed under either:
+
+- Apache License, Version 2.0 (`LICENSE-APACHE`)
+- MIT license (`LICENSE-MIT`)
 
 ## Contributing
 
-[Add contribution guidelines here]
+See `CONTRIBUTING.md`.

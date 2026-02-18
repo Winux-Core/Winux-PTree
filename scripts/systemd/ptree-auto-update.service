@@ -1,0 +1,9 @@
+[Unit]
+Description=PTree auto-update (git pull + rebuild + reinstall)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/ptree-auto-update
+ExecStart=/usr/local/lib/ptree/ptree-auto-update.sh
