@@ -1,0 +1,10 @@
+/home/fuckmychudlife/Desktop/Winux-PTree/tools/ptree-update-prompt/target/debug/deps/ecolor-0fb649ab8d05bc55.d: /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/lib.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/color32.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/hsva_gamma.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/hsva.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/rgba.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/hex_color_runtime.rs
+
+/home/fuckmychudlife/Desktop/Winux-PTree/tools/ptree-update-prompt/target/debug/deps/libecolor-0fb649ab8d05bc55.rmeta: /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/lib.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/color32.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/hsva_gamma.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/hsva.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/rgba.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/hex_color_runtime.rs
+
+/home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/lib.rs:
+/home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/color32.rs:
+/home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/hsva_gamma.rs:
+/home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/hsva.rs:
+/home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/rgba.rs:
+/home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ecolor-0.27.2/src/hex_color_runtime.rs:

@@ -1,0 +1,9 @@
+/home/fuckmychudlife/Desktop/Winux-PTree/tools/ptree-update-prompt/target/debug/deps/wayland_sys-e63fb47c05d6fb1b.d: /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/lib.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/common.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/client.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/server.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/egl.rs
+
+/home/fuckmychudlife/Desktop/Winux-PTree/tools/ptree-update-prompt/target/debug/deps/libwayland_sys-e63fb47c05d6fb1b.rmeta: /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/lib.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/common.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/client.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/server.rs /home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/egl.rs
+
+/home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/lib.rs:
+/home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/common.rs:
+/home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/client.rs:
+/home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/server.rs:
+/home/fuckmychudlife/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-sys-0.31.8/src/egl.rs:

@@ -9,15 +9,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-PTREE_BIN_SRC="${REPO_ROOT}/target/release/ptree"
-PTREE_BIN_DST="/usr/local/bin/ptree"
-PTREE_BIN_ALT="/usr/local/bin/Ptree"
-LOOP_SCRIPT_SRC="${SCRIPT_DIR}/ptree-driver-loop.sh"
-LOOP_SCRIPT_DST="/usr/local/lib/ptree/ptree-driver-loop.sh"
-UNIT_SRC="${SCRIPT_DIR}/systemd/ptree-driver.service"
-UNIT_DST="/etc/systemd/system/ptree-driver.service"
 ENV_DST="/etc/default/ptree-driver"
 PROFILE_DST="/etc/profile.d/ptree-path.sh"
+UPDATE_SCRIPT="${SCRIPT_DIR}/update-driver.sh"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -27,6 +21,7 @@ require_cmd() {
 }
 
 require_cmd cargo
+require_cmd git
 require_cmd sudo
 require_cmd systemctl
 
@@ -36,23 +31,20 @@ if ! command -v inotifywait >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Building ptree (release)..."
-(cd "${REPO_ROOT}" && cargo build --release)
-
-if [[ ! -x "${PTREE_BIN_SRC}" ]]; then
-  echo "Build did not produce ${PTREE_BIN_SRC}" >&2
+if [[ ! -x "${UPDATE_SCRIPT}" ]]; then
+  echo "Missing updater script: ${UPDATE_SCRIPT}" >&2
   exit 1
 fi
 
-echo "Installing binaries and service assets..."
-sudo install -d /usr/local/bin /usr/local/lib/ptree /etc/systemd/system /etc/default /etc/profile.d
-sudo install -m 0755 "${PTREE_BIN_SRC}" "${PTREE_BIN_DST}"
-sudo ln -sfn "${PTREE_BIN_DST}" "${PTREE_BIN_ALT}"
-sudo install -m 0755 "${LOOP_SCRIPT_SRC}" "${LOOP_SCRIPT_DST}"
-sudo install -m 0644 "${UNIT_SRC}" "${UNIT_DST}"
+echo "Running updater/install pipeline..."
+bash "${UPDATE_SCRIPT}"
 
 if [[ ! -f "${ENV_DST}" ]]; then
   sudo tee "${ENV_DST}" >/dev/null <<'EOF'
+# XDG cache base for the systemd service user.
+# ptree will use: $XDG_CACHE_HOME/ptree/ptree.dat
+XDG_CACHE_HOME="/var/cache"
+
 # Space-separated paths to monitor recursively.
 # Keep "/" for broad coverage; tune this if your system hits inotify limits.
 PTREE_WATCH_PATHS="/"
@@ -77,10 +69,6 @@ case ":$PATH:" in
 esac
 EOF
 
-echo "Enabling and starting ptree-driver.service..."
-sudo systemctl daemon-reload
-sudo systemctl enable --now ptree-driver.service
-
 echo
 echo "Installed successfully."
 echo "Binary:"
@@ -89,5 +77,8 @@ echo "  /usr/local/bin/Ptree"
 echo "Service:"
 echo "  sudo systemctl status ptree-driver.service"
 echo "  sudo journalctl -u ptree-driver.service -f"
+echo "Auto-update:"
+echo "  sudo systemctl status ptree-auto-update.timer"
+echo "  sudo systemctl list-timers | grep ptree-auto-update"
 echo "Config:"
 echo "  ${ENV_DST}"
