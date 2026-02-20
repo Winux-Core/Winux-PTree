@@ -1,28 +1,27 @@
-use ptree_cache::{DiskCache, DirEntry};
-use ptree_core::Args;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
 use chrono::Utc;
 use parking_lot::RwLock;
-use anyhow::Result;
-
-
+use ptree_cache::{DirEntry, DiskCache};
+use ptree_core::Args;
 
 /// Debug timing information and statistics
 #[derive(Debug, Clone)]
 pub struct DebugInfo {
-    pub is_first_run: bool,
-    pub scan_root: PathBuf,
-    pub cache_used: bool,
-    pub traversal_time: Duration,
-    pub save_time: Duration,
+    pub is_first_run:     bool,
+    pub scan_root:        PathBuf,
+    pub cache_used:       bool,
+    pub traversal_time:   Duration,
+    pub save_time:        Duration,
     pub cache_index_time: Duration,
-    pub total_dirs: usize,
-    pub total_files: usize,
-    pub threads_used: usize,
+    pub total_dirs:       usize,
+    pub total_files:      usize,
+    pub threads_used:     usize,
 }
 
 /// Shared state for parallel DFS traversal across worker threads
@@ -38,7 +37,7 @@ pub struct TraversalState {
 
     /// Directories to skip during traversal
     pub skip_dirs: std::collections::HashSet<String>,
-    
+
     /// Directories that changed since last scan (for incremental updates)
     /// If set, only these directories will be rescanned; unset means full scan
     pub changed_dirs_filter: Option<std::collections::HashSet<String>>,
@@ -72,12 +71,7 @@ pub struct TraversalState {
 /// 6. Initialize work queue with drive root
 /// 7. Spawn worker threads that process queue in parallel (iterative DFS)
 /// 8. Flush all pending writes and save cache atomically
-pub fn traverse_disk(
-    drive: &char,
-    cache: &mut DiskCache,
-    args: &Args,
-    cache_path: &Path,
-) -> Result<DebugInfo> {
+pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args, cache_path: &Path) -> Result<DebugInfo> {
     #[cfg(not(windows))]
     let _ = drive;
 
@@ -101,7 +95,7 @@ pub fn traverse_disk(
         // Default: scan current directory and subdirectories
         std::env::current_dir()?
     };
-    
+
     // Verify scan root exists and is a directory
     if !scan_root.exists() {
         anyhow::bail!("Scan root does not exist: {}", scan_root.display());
@@ -116,17 +110,17 @@ pub fn traverse_disk(
     // Ensure root directory is added to cache (important for --no-cache mode)
     if is_first_run && !cache.entries.contains_key(&scan_root) {
         let root_entry = DirEntry {
-            path: scan_root.clone(),
-            name: scan_root
+            path:           scan_root.clone(),
+            name:           scan_root
                 .file_name()
                 .and_then(|n| n.to_str().map(|s| s.to_string()))
                 .unwrap_or_default(),
-            modified: Utc::now(),
-            content_hash: 0,
-            children: Vec::new(),
+            modified:       Utc::now(),
+            content_hash:   0,
+            children:       Vec::new(),
             symlink_target: None,
-            is_hidden: false,
-            is_dir: true,
+            is_hidden:      false,
+            is_dir:         true,
         };
         cache.entries.insert(scan_root.clone(), root_entry);
     }
@@ -136,7 +130,7 @@ pub fn traverse_disk(
     // ============================================================================
 
     let cache_ttl_seconds = args.cache_ttl.unwrap_or(3600);
-    
+
     let should_use_cache = if args.no_cache {
         false // --no-cache always triggers rescan
     } else if args.force {
@@ -149,7 +143,7 @@ pub fn traverse_disk(
         let age = now.signed_duration_since(cache.last_scan);
         age.num_seconds() < cache_ttl_seconds as i64
     };
-    
+
     if should_use_cache {
         let total_files = if cache.entries.is_empty() {
             0
@@ -172,7 +166,7 @@ pub fn traverse_disk(
     // ============================================================================
     // Prepare for Traversal
     // ============================================================================
-    
+
     // Incremental directory filtering is currently disabled.
     // Traversal always performs full DFS for refresh runs.
     let changed_dirs_filter: Option<std::collections::HashSet<String>> = None;
@@ -208,9 +202,7 @@ pub fn traverse_disk(
         }
     });
 
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build()?;
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(num_threads).build()?;
 
     // ============================================================================
     // Spawn Worker Threads for Parallel DFS Traversal
@@ -253,7 +245,7 @@ pub fn traverse_disk(
     final_cache.flush_pending_writes();
 
     let cache_index_start = Instant::now();
-    
+
     *cache = final_cache;
     cache.last_scan = Utc::now();
 
@@ -280,7 +272,7 @@ pub fn traverse_disk(
     // ============================================================================
 
     let total_files = cache.entries.values().map(|e| e.children.len()).sum();
-    
+
     Ok(DebugInfo {
         is_first_run,
         scan_root: cache.root.clone(),
@@ -315,7 +307,7 @@ fn dfs_worker(
     let mut entry_buffer: Vec<(PathBuf, DirEntry)> = Vec::with_capacity(500);
     let mut skip_buffer: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let flush_threshold = 500;
-    
+
     loop {
         // ====================================================================
         // Batch Work Stealing: Grab multiple directories at once (not just 1)
@@ -325,7 +317,8 @@ fn dfs_worker(
         let batch = {
             let mut queue = work_queue.lock().unwrap();
             let mut batch = Vec::new();
-            for _ in 0..10 {  // Grab up to 10 items in single lock
+            for _ in 0..10 {
+                // Grab up to 10 items in single lock
                 if let Some(path) = queue.pop_front() {
                     batch.push(path);
                 } else {
@@ -353,227 +346,224 @@ fn dfs_worker(
         }
 
         // Process batch of directories
-         for path in batch {
-             // ================================================================
-             // Acquire Per-Directory Lock (prevents duplicate processing)
-             // ================================================================
+        for path in batch {
+            // ================================================================
+            // Acquire Per-Directory Lock (prevents duplicate processing)
+            // ================================================================
 
-             let acquired = {
-                 let mut progress = in_progress.lock().unwrap();
-                 if !progress.contains(&path) {
-                     progress.insert(path.clone());
-                     true
-                 } else {
-                     false
-                 }
-             };
+            let acquired = {
+                let mut progress = in_progress.lock().unwrap();
+                if !progress.contains(&path) {
+                    progress.insert(path.clone());
+                    true
+                } else {
+                    false
+                }
+            };
 
-             if acquired {
-                 // ============================================================
-                 // Check Incremental Filter (if applicable)
-                 // ============================================================
-                 
-                 let should_process = if let Some(filter) = changed_dirs_filter {
-                     // Incremental mode: only process if this directory changed
-                     let dir_name = path.file_name()
-                         .and_then(|n| n.to_str())
-                         .unwrap_or("");
-                     filter.contains(dir_name) || path == *scan_root
-                 } else {
-                     // Full scan mode: process all directories
-                     true
-                 };
-                 
-                 if should_process {
-                     // ============================================================
-                     // Enumerate Directory & Process Entries
-                     // ============================================================
+            if acquired {
+                // ============================================================
+                // Check Incremental Filter (if applicable)
+                // ============================================================
 
-                     if let Ok(entries) = fs::read_dir(&path) {
-                          let mut children = Vec::new();
-                          let mut child_entries = Vec::new();
-                          let mut child_dirs_to_queue = Vec::new();
-                          let mut child_files_to_cache = Vec::new();
-                          let mut skipped = Vec::new(); // Batch skipped directories
+                let should_process = if let Some(filter) = changed_dirs_filter {
+                    // Incremental mode: only process if this directory changed
+                    let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    filter.contains(dir_name) || path == *scan_root
+                } else {
+                    // Full scan mode: process all directories
+                    true
+                };
 
-                          for entry_result in entries {
-                               if let Ok(entry) = entry_result {
-                                   let file_name = entry.file_name();
-                                   let file_name_str = file_name.to_string_lossy();
+                if should_process {
+                    // ============================================================
+                    // Enumerate Directory & Process Entries
+                    // ============================================================
 
-                                   // Skip filtered directories
-                                   if should_skip(&file_name_str, skip_dirs) {
-                                       // Batch skip statistics (don't lock on every skip)
-                                       skipped.push(file_name_str.to_string());
-                                       continue;
-                                   }
+                    if let Ok(entries) = fs::read_dir(&path) {
+                        let mut children = Vec::new();
+                        let mut child_entries = Vec::new();
+                        let mut child_dirs_to_queue = Vec::new();
+                        let mut child_files_to_cache = Vec::new();
+                        let mut skipped = Vec::new(); // Batch skipped directories
 
-                                   let child_path = entry.path();
-                                   children.push(file_name_str.to_string());
+                        for entry_result in entries {
+                            if let Ok(entry) = entry_result {
+                                let file_name = entry.file_name();
+                                let file_name_str = file_name.to_string_lossy();
 
-                                   // Check if this is a directory (avoid unnecessary metadata calls for files)
-                                   match entry.file_type() {
-                                       Ok(ft) if ft.is_dir() => {
-                                           // Queue directories for processing
-                                           child_dirs_to_queue.push(child_path.clone());
-                                           // Also add to cache for file listing
-                                           if !child_files_to_cache.iter().any(|p| p == &child_path) {
-                                               child_files_to_cache.push(child_path);
-                                           }
-                                       }
-                                       Ok(ft) if ft.is_symlink() => {
-                                           // Capture symlink target - add to both queues if it's a dir symlink
-                                           let target = fs::read_link(&child_path).ok();
-                                           child_entries.push((file_name_str.to_string(), target));
-                                           child_files_to_cache.push(child_path.clone());
-                                           // Don't queue symlinks for traversal - they would cause loops
-                                       }
-                                       Ok(_) => {
-                                           // Regular file: add to cache but don't queue for traversal
-                                           child_files_to_cache.push(child_path);
-                                       }
-                                       _ => {} // Couldn't get file type, skip
-                                   }
-                               }
-                          }
+                                // Skip filtered directories
+                                if should_skip(&file_name_str, skip_dirs) {
+                                    // Batch skip statistics (don't lock on every skip)
+                                    skipped.push(file_name_str.to_string());
+                                    continue;
+                                }
 
-                          // ========================================================
-                          // Batch queue directories (reduce lock contention)
-                          // ========================================================
-                          if !child_dirs_to_queue.is_empty() {
-                              let mut queue = work_queue.lock().unwrap();
-                              for dir_path in child_dirs_to_queue {
-                                  queue.push_back(dir_path);
-                              }
-                          }
-                          
-                          // ========================================================
-                          // Buffer file entries (thread-local, flush periodically)
-                          // Reduces cache.write() lock acquisitions dramatically
-                          // ========================================================
-                          for file_path in child_files_to_cache {
-                              let file_entry = DirEntry {
-                                  path: file_path.clone(),
-                                  name: file_path
-                                      .file_name()
-                                      .and_then(|n| n.to_str().map(|s| s.to_string()))
-                                      .unwrap_or_default(),
-                                  modified: Utc::now(),
-                                  content_hash: 0,
-                                  children: Vec::new(),
-                                  symlink_target: None,
-                                  is_hidden: false,
-                                  is_dir: false,
-                              };
-                              entry_buffer.push((file_path, file_entry));
-                              
-                              // Flush if threshold reached
-                              if entry_buffer.len() >= flush_threshold {
-                                  let mut cache_guard = cache.write();
-                                  for (p, e) in entry_buffer.drain(..) {
-                                      cache_guard.add_entry(p, e);
-                                  }
-                              }
-                          }
+                                let child_path = entry.path();
+                                children.push(file_name_str.to_string());
 
-                          // ========================================================
-                          // Buffer skip statistics (thread-local, flush on exit)
-                          // ========================================================
-                          for skip_name in skipped {
-                              *skip_buffer.entry(skip_name).or_insert(0) += 1;
-                          }
+                                // Check if this is a directory (avoid unnecessary metadata calls for files)
+                                match entry.file_type() {
+                                    Ok(ft) if ft.is_dir() => {
+                                        // Queue directories for processing
+                                        child_dirs_to_queue.push(child_path.clone());
+                                        // Also add to cache for file listing
+                                        if !child_files_to_cache.iter().any(|p| p == &child_path) {
+                                            child_files_to_cache.push(child_path);
+                                        }
+                                    }
+                                    Ok(ft) if ft.is_symlink() => {
+                                        // Capture symlink target - add to both queues if it's a dir symlink
+                                        let target = fs::read_link(&child_path).ok();
+                                        child_entries.push((file_name_str.to_string(), target));
+                                        child_files_to_cache.push(child_path.clone());
+                                        // Don't queue symlinks for traversal - they would cause loops
+                                    }
+                                    Ok(_) => {
+                                        // Regular file: add to cache but don't queue for traversal
+                                        child_files_to_cache.push(child_path);
+                                    }
+                                    _ => {} // Couldn't get file type, skip
+                                }
+                            }
+                        }
 
-                          // ========================================================
-                          // Skip sorting during traversal (defer to output phase)
-                          // Children list stored unsorted for now
-                          // ========================================================
+                        // ========================================================
+                        // Batch queue directories (reduce lock contention)
+                        // ========================================================
+                        if !child_dirs_to_queue.is_empty() {
+                            let mut queue = work_queue.lock().unwrap();
+                            for dir_path in child_dirs_to_queue {
+                                queue.push_back(dir_path);
+                            }
+                        }
 
-                          // Check if directory has hidden attribute (Windows only)
-                          let is_hidden = {
-                              #[cfg(windows)]
-                              {
-                                  use std::os::windows::fs::MetadataExt;
-                                  fs::metadata(&path)
-                                      .map(|m| {
-                                          const FILE_ATTRIBUTE_HIDDEN: u32 = 0x02;
-                                          (m.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0
-                                      })
-                                      .unwrap_or(false)
-                              }
-                              #[cfg(not(windows))]
-                              {
-                                  // Unix-like: check if name starts with dot
-                                  path.file_name()
-                                      .and_then(|n| n.to_str())
-                                      .map(|s| s.starts_with('.'))
-                                      .unwrap_or(false)
-                              }
-                          };
+                        // ========================================================
+                        // Buffer file entries (thread-local, flush periodically)
+                        // Reduces cache.write() lock acquisitions dramatically
+                        // ========================================================
+                        for file_path in child_files_to_cache {
+                            let file_entry = DirEntry {
+                                path:           file_path.clone(),
+                                name:           file_path
+                                    .file_name()
+                                    .and_then(|n| n.to_str().map(|s| s.to_string()))
+                                    .unwrap_or_default(),
+                                modified:       Utc::now(),
+                                content_hash:   0,
+                                children:       Vec::new(),
+                                symlink_target: None,
+                                is_hidden:      false,
+                                is_dir:         false,
+                            };
+                            entry_buffer.push((file_path, file_entry));
 
-                          let dir_entry = DirEntry {
-                              path: path.clone(),
-                              name: path
-                                  .file_name()
-                                  .and_then(|n| n.to_str().map(|s| s.to_string()))
-                                  .unwrap_or_default(),
-                              modified: Utc::now(),
-                              content_hash: 0,
-                              children,
-                              symlink_target: None,
-                              is_hidden,
-                              is_dir: true,
-                          };
+                            // Flush if threshold reached
+                            if entry_buffer.len() >= flush_threshold {
+                                let mut cache_guard = cache.write();
+                                for (p, e) in entry_buffer.drain(..) {
+                                    cache_guard.add_entry(p, e);
+                                }
+                            }
+                        }
 
-                          // ========================================================
-                          // Buffer directory entry (thread-local, flush periodically)
-                          // Minimizes cache.write() lock acquisitions
-                          // ========================================================
-                          entry_buffer.push((path.clone(), dir_entry));
-                          
-                          if entry_buffer.len() >= flush_threshold {
-                              let mut cache_guard = cache.write();
-                              for (p, e) in entry_buffer.drain(..) {
-                                  cache_guard.add_entry(p, e);
-                              }
-                          }
-                     }
+                        // ========================================================
+                        // Buffer skip statistics (thread-local, flush on exit)
+                        // ========================================================
+                        for skip_name in skipped {
+                            *skip_buffer.entry(skip_name).or_insert(0) += 1;
+                        }
 
-                     // ============================================================
-                     // Release Per-Directory Lock
-                     // ============================================================
+                        // ========================================================
+                        // Skip sorting during traversal (defer to output phase)
+                        // Children list stored unsorted for now
+                        // ========================================================
 
-                     {
-                         let mut progress = in_progress.lock().unwrap();
-                         progress.remove(&path);
-                     }
-                 } else {
-                     // Directory filtered out (incremental mode): skip it
-                     {
-                         let mut progress = in_progress.lock().unwrap();
-                         progress.remove(&path);
-                     }
-                 }
-             }
-         }
+                        // Check if directory has hidden attribute (Windows only)
+                        let is_hidden = {
+                            #[cfg(windows)]
+                            {
+                                use std::os::windows::fs::MetadataExt;
+                                fs::metadata(&path)
+                                    .map(|m| {
+                                        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x02;
+                                        (m.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0
+                                    })
+                                    .unwrap_or(false)
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                // Unix-like: check if name starts with dot
+                                path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(|s| s.starts_with('.'))
+                                    .unwrap_or(false)
+                            }
+                        };
+
+                        let dir_entry = DirEntry {
+                            path: path.clone(),
+                            name: path
+                                .file_name()
+                                .and_then(|n| n.to_str().map(|s| s.to_string()))
+                                .unwrap_or_default(),
+                            modified: Utc::now(),
+                            content_hash: 0,
+                            children,
+                            symlink_target: None,
+                            is_hidden,
+                            is_dir: true,
+                        };
+
+                        // ========================================================
+                        // Buffer directory entry (thread-local, flush periodically)
+                        // Minimizes cache.write() lock acquisitions
+                        // ========================================================
+                        entry_buffer.push((path.clone(), dir_entry));
+
+                        if entry_buffer.len() >= flush_threshold {
+                            let mut cache_guard = cache.write();
+                            for (p, e) in entry_buffer.drain(..) {
+                                cache_guard.add_entry(p, e);
+                            }
+                        }
+                    }
+
+                    // ============================================================
+                    // Release Per-Directory Lock
+                    // ============================================================
+
+                    {
+                        let mut progress = in_progress.lock().unwrap();
+                        progress.remove(&path);
+                    }
+                } else {
+                    // Directory filtered out (incremental mode): skip it
+                    {
+                        let mut progress = in_progress.lock().unwrap();
+                        progress.remove(&path);
+                    }
+                }
+            }
+        }
     }
 }
 
 fn should_skip(name: &str, skip_dirs: &std::collections::HashSet<String>) -> bool {
-    skip_dirs.iter().any(|skip| {
-        name.eq_ignore_ascii_case(skip)
-    })
+    skip_dirs.iter().any(|skip| name.eq_ignore_ascii_case(skip))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
+    #[cfg(windows)]
     #[test]
     fn test_should_skip() {
         let mut skip = std::collections::HashSet::new();
         skip.insert("System32".to_string());
         skip.insert(".git".to_string());
-        
+
         assert!(should_skip("System32", &skip));
         assert!(should_skip(".git", &skip));
         assert!(!should_skip("Documents", &skip));

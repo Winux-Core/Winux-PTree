@@ -1,11 +1,11 @@
-use anyhow::Result;
-use ptree_core::{OutputFormat, ColorMode};
-use ptree_cache::DiskCache;
-use ptree_traversal::traverse_disk;
 use std::time::Instant;
 
+use anyhow::Result;
+use ptree_cache::DiskCache;
+use ptree_core::{ColorMode, OutputFormat};
 #[cfg(feature = "scheduler")]
 use ptree_scheduler as scheduler;
+use ptree_traversal::traverse_disk;
 
 fn main() -> Result<()> {
     let program_start = Instant::now();
@@ -64,7 +64,7 @@ fn main() -> Result<()> {
     // ========================================================================
 
     cache.show_hidden = args.hidden;
-    
+
     if cache.entries.is_empty() {
         let _ = cache.load_all_entries_lazy(&cache_path);
     }
@@ -85,7 +85,7 @@ fn main() -> Result<()> {
         None
     };
     let formatting_elapsed = formatting_start.elapsed();
-    
+
     let output_start = Instant::now();
     if let Some(output) = output {
         println!("{}", output);
@@ -106,7 +106,14 @@ fn main() -> Result<()> {
 
     if args.stats {
         let total_elapsed = program_start.elapsed();
-        print_debug_summary(&debug_info, cache_load_elapsed, formatting_elapsed, output_elapsed, &cache_path, total_elapsed);
+        print_debug_summary(
+            &debug_info,
+            cache_load_elapsed,
+            formatting_elapsed,
+            output_elapsed,
+            &cache_path,
+            total_elapsed,
+        );
     }
 
     Ok(())
@@ -132,7 +139,17 @@ fn print_debug_summary(
     eprintln!("{:^70}", "PERFORMANCE DEBUG INFO");
     eprintln!("{}", "=".repeat(70));
 
-    eprintln!("\n{:<40} {}", "Execution Mode:", if debug_info.is_first_run { "FULL DISK SCAN (First Run)" } else if debug_info.cache_used { "CACHED (< 1 hour)" } else { "PARTIAL SCAN (Current Dir)" });
+    eprintln!(
+        "\n{:<40} {}",
+        "Execution Mode:",
+        if debug_info.is_first_run {
+            "FULL DISK SCAN (First Run)"
+        } else if debug_info.cache_used {
+            "CACHED (< 1 hour)"
+        } else {
+            "PARTIAL SCAN (Current Dir)"
+        }
+    );
     eprintln!("{:<40} {}", "Scan Root:", debug_info.scan_root.display());
 
     eprintln!("\n{:<40} {}", "Directories Scanned:", format_number(debug_info.total_dirs));

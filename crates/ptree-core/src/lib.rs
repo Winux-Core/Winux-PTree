@@ -1,5 +1,5 @@
 pub mod cli;
 pub mod error;
 
-pub use cli::{Args, ColorMode, OutputFormat, parse_args};
+pub use cli::{parse_args, Args, ColorMode, OutputFormat};
 pub use error::{PTreeError, PTreeResult};

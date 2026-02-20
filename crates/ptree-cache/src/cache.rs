@@ -1,15 +1,16 @@
-use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Utc};
+
 use anyhow::{anyhow, Result};
-use serde_json::json;
+use chrono::{DateTime, Utc};
 use colored::Colorize;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use rayon::slice::ParallelSliceMut;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 #[cfg(windows)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -22,14 +23,14 @@ pub struct USNJournalState;
 /// Directory metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirEntry {
-    pub path: PathBuf,
-    pub name: String,
-    pub modified: DateTime<Utc>,
-    pub content_hash: u64, // NEW FIELD - Merkle tree hash for change detection
-    pub children: Vec<String>, // child names only, not full paths
+    pub path:           PathBuf,
+    pub name:           String,
+    pub modified:       DateTime<Utc>,
+    pub content_hash:   u64,             // NEW FIELD - Merkle tree hash for change detection
+    pub children:       Vec<String>,     // child names only, not full paths
     pub symlink_target: Option<PathBuf>, // If this entry is a symlink, store target
-    pub is_hidden: bool, // Whether the directory has hidden attribute
-    pub is_dir: bool, // Whether this entry is a directory (vs file/symlink)
+    pub is_hidden:      bool,            // Whether the directory has hidden attribute
+    pub is_dir:         bool,            // Whether this entry is a directory (vs file/symlink)
 }
 
 /// Compute Merkle tree-style content hash for a directory
@@ -163,104 +164,104 @@ impl DiskCache {
     // ============================================================================
 
     /// Open or create cache file with fast cold-start lazy loading
-     /// 
-     /// Strategy:
-     /// - Load index only (~1ms for millions of entries)
-     /// - Defer entry deserialization until output phase
-     /// - Use in-memory entries for traversal building
-     pub fn open(path: &Path) -> Result<Self> {
-         fs::create_dir_all(path.parent().unwrap())?;
-    
-         // Load from lazy cache format (index only, deferred entry loading)
-         let index_path = path.with_extension("idx");
-         let data_path = path.with_extension("dat");
-         
-         if index_path.exists() && data_path.exists() {
-             if let Ok(cache) = Self::load_from_lazy_cache(&index_path, &data_path) {
-                 return Ok(cache);
-             }
-         }
-    
-         Ok(Self::new_empty())
-     }
-     
-     /// Load from lazy cache format - index only (fast cold start)
-     /// Entries not loaded until output phase to minimize startup time
-     fn load_from_lazy_cache(index_path: &Path, data_path: &Path) -> Result<Self> {
-         use crate::cache_rkyv::RkyvMmapCache;
-         
-         let rkyv_cache = RkyvMmapCache::open(index_path, data_path)?;
-         
-         // DO NOT load all entries - keep HashMap empty for cold-start speed
-         // Entries will be loaded on-demand during output formatting
-         
-         Ok(DiskCache {
-             entries: HashMap::new(), // Empty - entries loaded on-demand
-             last_scan: rkyv_cache.index.last_scan,
-             root: rkyv_cache.index.root.clone(),
-             last_scanned_root: rkyv_cache.index.last_scanned_root.clone(),
-             #[cfg(windows)]
-             usn_state: rkyv_cache.index.usn_state.clone(),
-             pending_writes: Vec::new(),
-             flush_threshold: 5000,
-             show_hidden: false,
-             skip_stats: rkyv_cache.index.skip_stats.clone(),
-             has_persisted_snapshot: true,
-             persisted_entry_count: rkyv_cache.index.offsets.len(),
-         })
-     }
-    
+    ///
+    /// Strategy:
+    /// - Load index only (~1ms for millions of entries)
+    /// - Defer entry deserialization until output phase
+    /// - Use in-memory entries for traversal building
+    pub fn open(path: &Path) -> Result<Self> {
+        fs::create_dir_all(path.parent().unwrap())?;
+
+        // Load from lazy cache format (index only, deferred entry loading)
+        let index_path = path.with_extension("idx");
+        let data_path = path.with_extension("dat");
+
+        if index_path.exists() && data_path.exists() {
+            if let Ok(cache) = Self::load_from_lazy_cache(&index_path, &data_path) {
+                return Ok(cache);
+            }
+        }
+
+        Ok(Self::new_empty())
+    }
+
+    /// Load from lazy cache format - index only (fast cold start)
+    /// Entries not loaded until output phase to minimize startup time
+    fn load_from_lazy_cache(index_path: &Path, data_path: &Path) -> Result<Self> {
+        use crate::cache_rkyv::RkyvMmapCache;
+
+        let rkyv_cache = RkyvMmapCache::open(index_path, data_path)?;
+
+        // DO NOT load all entries - keep HashMap empty for cold-start speed
+        // Entries will be loaded on-demand during output formatting
+
+        Ok(DiskCache {
+            entries:                   HashMap::new(), // Empty - entries loaded on-demand
+            last_scan:                 rkyv_cache.index.last_scan,
+            root:                      rkyv_cache.index.root.clone(),
+            last_scanned_root:         rkyv_cache.index.last_scanned_root.clone(),
+            #[cfg(windows)]
+            usn_state:                 rkyv_cache.index.usn_state.clone(),
+            pending_writes:            Vec::new(),
+            flush_threshold:           5000,
+            show_hidden:               false,
+            skip_stats:                rkyv_cache.index.skip_stats.clone(),
+            has_persisted_snapshot:    true,
+            persisted_entry_count:     rkyv_cache.index.offsets.len(),
+        })
+    }
+
     /// Create a new empty cache with default USN state
     #[cfg(windows)]
     fn new_empty() -> Self {
         DiskCache {
             // Pre-allocate for typical disk with ~100k directories
             // Reduces reallocation overhead during traversal
-            entries: HashMap::with_capacity(100_000),
-            last_scan: Utc::now(),
-            root: PathBuf::new(),
-            last_scanned_root: PathBuf::new(),
-            usn_state: USNJournalState::default(),
-            pending_writes: Vec::with_capacity(5000),
-            flush_threshold: 5000,
-            show_hidden: false,
-            skip_stats: HashMap::new(),
+            entries:                HashMap::with_capacity(100_000),
+            last_scan:              Utc::now(),
+            root:                   PathBuf::new(),
+            last_scanned_root:      PathBuf::new(),
+            usn_state:              USNJournalState::default(),
+            pending_writes:         Vec::with_capacity(5000),
+            flush_threshold:        5000,
+            show_hidden:            false,
+            skip_stats:             HashMap::new(),
             has_persisted_snapshot: false,
-            persisted_entry_count: 0,
+            persisted_entry_count:  0,
         }
     }
-    
+
     /// Create a new empty cache with default USN state (non-Windows)
     #[cfg(not(windows))]
     fn new_empty() -> Self {
         DiskCache {
             // Pre-allocate for typical disk with ~100k directories
             // Reduces reallocation overhead during traversal
-            entries: HashMap::with_capacity(100_000),
-            last_scan: Utc::now(),
-            root: PathBuf::new(),
-            last_scanned_root: PathBuf::new(),
-            pending_writes: Vec::with_capacity(5000),
-            flush_threshold: 5000,
-            show_hidden: false,
-            skip_stats: HashMap::new(),
+            entries:                HashMap::with_capacity(100_000),
+            last_scan:              Utc::now(),
+            root:                   PathBuf::new(),
+            last_scanned_root:      PathBuf::new(),
+            pending_writes:         Vec::with_capacity(5000),
+            flush_threshold:        5000,
+            show_hidden:            false,
+            skip_stats:             HashMap::new(),
             has_persisted_snapshot: false,
-            persisted_entry_count: 0,
+            persisted_entry_count:  0,
         }
     }
 
     /// Save cache using rkyv mmap format (index + data files with O(1) access)
-     pub fn save(&mut self, path: &Path) -> Result<()> {
-         self.flush_pending_writes();
-         self.has_persisted_snapshot = true;
-         self.persisted_entry_count = self.entries.len();
-    
-         let index_path = path.with_extension("idx");
-         let data_path = path.with_extension("dat");
-         
-         self.save_as_rkyv_mmap(&index_path, &data_path)?;
-         Ok(())
-     }
+    pub fn save(&mut self, path: &Path) -> Result<()> {
+        self.flush_pending_writes();
+        self.has_persisted_snapshot = true;
+        self.persisted_entry_count = self.entries.len();
+
+        let index_path = path.with_extension("idx");
+        let data_path = path.with_extension("dat");
+
+        self.save_as_rkyv_mmap(&index_path, &data_path)?;
+        Ok(())
+    }
 
     /// True if we have an existing on-disk cache snapshot.
     pub fn has_cache_snapshot(&self) -> bool {
@@ -275,64 +276,64 @@ impl DiskCache {
             self.entries.len()
         }
     }
-     
-     /// Save cache in mmap format (index + data files with bincode serialization)
-     fn save_as_rkyv_mmap(&self, index_path: &Path, data_path: &Path) -> Result<()> {
-         use crate::cache_rkyv::{RkyvDirEntry, RkyvCacheIndex};
-         
-         fs::create_dir_all(index_path.parent().unwrap())?;
-         
-         // Build index with byte offsets
-         let mut rkyv_index = RkyvCacheIndex::new();
-         rkyv_index.offsets = HashMap::with_capacity(self.entries.len());
-         rkyv_index.root = self.root.clone();
-         rkyv_index.last_scanned_root = self.last_scanned_root.clone();
-         rkyv_index.last_scan = self.last_scan;
-         rkyv_index.skip_stats = self.skip_stats.clone();
-         #[cfg(windows)]
-         {
-             rkyv_index.usn_state = self.usn_state.clone();
-         }
-         
-         let data_file = File::create(data_path)?;
-         let mut data_file = BufWriter::with_capacity(8 * 1024 * 1024, data_file);
-         let mut offset: u64 = 0;
-         
-         for (path, entry) in &self.entries {
-             let rkyv_entry = RkyvDirEntry {
-                 path: entry.path.clone(),
-                 name: entry.name.clone(),
-                 modified: entry.modified,
-                 content_hash: entry.content_hash,
-                 children: entry.children.clone(),
-                 symlink_target: entry.symlink_target.clone(),
-                 is_hidden: entry.is_hidden,
-                 is_dir: entry.is_dir,
-             };
-             
-             let serialized = bincode::serialize(&rkyv_entry)?;
-             let len = serialized.len() as u32;
-             
-             rkyv_index.offsets.insert(path.clone(), offset);
-             data_file.write_all(&len.to_le_bytes())?;
-             data_file.write_all(&serialized)?;
-             offset += 4 + len as u64;
-         }
-         data_file.flush()?;
-         drop(data_file);
-         
-         // Save index
-         let index_serialized = bincode::serialize(&rkyv_index)?;
-         let temp_path = index_path.with_extension("tmp");
-         let index_file = File::create(&temp_path)?;
-         let mut index_file = BufWriter::new(index_file);
-         index_file.write_all(&index_serialized)?;
-         index_file.flush()?;
-         drop(index_file);
-         fs::rename(&temp_path, index_path)?;
-         
-         Ok(())
-     }
+
+    /// Save cache in mmap format (index + data files with bincode serialization)
+    fn save_as_rkyv_mmap(&self, index_path: &Path, data_path: &Path) -> Result<()> {
+        use crate::cache_rkyv::{RkyvCacheIndex, RkyvDirEntry};
+
+        fs::create_dir_all(index_path.parent().unwrap())?;
+
+        // Build index with byte offsets
+        let mut rkyv_index = RkyvCacheIndex::new();
+        rkyv_index.offsets = HashMap::with_capacity(self.entries.len());
+        rkyv_index.root = self.root.clone();
+        rkyv_index.last_scanned_root = self.last_scanned_root.clone();
+        rkyv_index.last_scan = self.last_scan;
+        rkyv_index.skip_stats = self.skip_stats.clone();
+        #[cfg(windows)]
+        {
+            rkyv_index.usn_state = self.usn_state.clone();
+        }
+
+        let data_file = File::create(data_path)?;
+        let mut data_file = BufWriter::with_capacity(8 * 1024 * 1024, data_file);
+        let mut offset: u64 = 0;
+
+        for (path, entry) in &self.entries {
+            let rkyv_entry = RkyvDirEntry {
+                path:           entry.path.clone(),
+                name:           entry.name.clone(),
+                modified:       entry.modified,
+                content_hash:   entry.content_hash,
+                children:       entry.children.clone(),
+                symlink_target: entry.symlink_target.clone(),
+                is_hidden:      entry.is_hidden,
+                is_dir:         entry.is_dir,
+            };
+
+            let serialized = bincode::serialize(&rkyv_entry)?;
+            let len = serialized.len() as u32;
+
+            rkyv_index.offsets.insert(path.clone(), offset);
+            data_file.write_all(&len.to_le_bytes())?;
+            data_file.write_all(&serialized)?;
+            offset += 4 + len as u64;
+        }
+        data_file.flush()?;
+        drop(data_file);
+
+        // Save index
+        let index_serialized = bincode::serialize(&rkyv_index)?;
+        let temp_path = index_path.with_extension("tmp");
+        let index_file = File::create(&temp_path)?;
+        let mut index_file = BufWriter::new(index_file);
+        index_file.write_all(&index_serialized)?;
+        index_file.flush()?;
+        drop(index_file);
+        fs::rename(&temp_path, index_path)?;
+
+        Ok(())
+    }
 
     // ============================================================================
     // Entry Management
@@ -353,62 +354,62 @@ impl DiskCache {
             self.entries.insert(path, entry);
         }
     }
-    
+
     /// Load entries on-demand from lazy cache (for cold-start output)
     /// Only loads entries needed for tree building, not entire cache
     pub fn load_entries_lazy(&mut self, paths: &[PathBuf], cache_path: &Path) -> Result<()> {
         use crate::cache_rkyv::RkyvMmapCache;
-        
+
         let index_path = cache_path.with_extension("idx");
         let data_path = cache_path.with_extension("dat");
-        
+
         if !index_path.exists() || !data_path.exists() {
             return Ok(());
         }
-        
+
         let rkyv_cache = RkyvMmapCache::open(&index_path, &data_path)?;
-        
+
         for path in paths {
             if !self.entries.contains_key(path) {
                 if let Some(rkyv_entry) = rkyv_cache.get_entry(path)? {
                     let entry = DirEntry {
-                        path: rkyv_entry.path,
-                        name: rkyv_entry.name,
-                        modified: rkyv_entry.modified,
-                        content_hash: rkyv_entry.content_hash,
-                        children: rkyv_entry.children,
+                        path:           rkyv_entry.path,
+                        name:           rkyv_entry.name,
+                        modified:       rkyv_entry.modified,
+                        content_hash:   rkyv_entry.content_hash,
+                        children:       rkyv_entry.children,
                         symlink_target: rkyv_entry.symlink_target,
-                        is_hidden: rkyv_entry.is_hidden,
-                        is_dir: rkyv_entry.is_dir,
+                        is_hidden:      rkyv_entry.is_hidden,
+                        is_dir:         rkyv_entry.is_dir,
                     };
                     self.entries.insert(path.clone(), entry);
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Load all entries from lazy cache (fallback for full tree operations)
     pub fn load_all_entries_lazy(&mut self, cache_path: &Path) -> Result<()> {
         use crate::cache_rkyv::RkyvMmapCache;
-        
+
         let index_path = cache_path.with_extension("idx");
         let data_path = cache_path.with_extension("dat");
-        
+
         if !index_path.exists() || !data_path.exists() {
             return Ok(());
         }
-        
+
         let rkyv_cache = RkyvMmapCache::open(&index_path, &data_path)?;
         let lazy_entries = rkyv_cache.get_all()?;
-        
+
         for (path, entry) in lazy_entries {
             if !self.entries.contains_key(&path) {
                 self.entries.insert(path, entry);
             }
         }
-        
+
         Ok(())
     }
 
@@ -523,7 +524,7 @@ impl DiskCache {
                 };
 
                 let branch = if is_last_child { "└── " } else { "├── " };
-                
+
                 // Check if this child is a symlink
                 let child_path = path.join(child_name);
                 let display_name = if let Some(entry) = self.get_entry(&child_path) {
@@ -536,7 +537,7 @@ impl DiskCache {
                 } else {
                     child_name.to_string()
                 };
-                
+
                 output.push_str(&format!("{}{}{}\n", prefix, branch, display_name));
                 self.print_tree(
                     output,
@@ -614,7 +615,7 @@ impl DiskCache {
 
                 let branch = if is_last_child { "└── " } else { "├── " };
                 let branch_colored = branch.cyan().to_string();
-                
+
                 // Check if this child is a symlink
                 let child_path = path.join(child_name);
                 let display_name = if let Some(entry) = self.get_entry(&child_path) {
@@ -627,7 +628,7 @@ impl DiskCache {
                 } else {
                     child_name.bright_blue().to_string()
                 };
-                
+
                 output.push_str(&format!("{}{}{}\n", prefix, branch_colored, display_name));
                 self.print_colored_tree(
                     output,
@@ -718,10 +719,7 @@ pub fn get_cache_path() -> Result<PathBuf> {
     #[cfg(windows)]
     {
         let appdata = std::env::var("APPDATA")?;
-        return Ok(PathBuf::from(appdata)
-            .join("ptree")
-            .join("cache")
-            .join("ptree.dat"));
+        return Ok(PathBuf::from(appdata).join("ptree").join("cache").join("ptree.dat"));
     }
 
     #[cfg(not(windows))]
@@ -737,9 +735,7 @@ pub fn get_cache_path() -> Result<PathBuf> {
             }
         }
 
-        Err(anyhow!(
-            "Could not determine cache directory. Set XDG_CACHE_HOME or HOME to an absolute path."
-        ))
+        Err(anyhow!("Could not determine cache directory. Set XDG_CACHE_HOME or HOME to an absolute path."))
     }
 }
 
@@ -772,16 +768,16 @@ pub fn get_cache_path_custom(custom_dir: Option<&str>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_cache_creation() -> Result<()> {
         let temp_dir = std::env::temp_dir().join("ptree_test_cache");
         fs::create_dir_all(&temp_dir)?;
         let cache_path = temp_dir.join("test.dat");
-        
+
         let cache = DiskCache::open(&cache_path)?;
         assert!(cache.entries.is_empty());
-        
+
         // Clean up
         let _ = fs::remove_dir_all(&temp_dir);
         Ok(())
@@ -804,10 +800,7 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn test_xdg_absolute_dir_validation() {
-        assert_eq!(
-            parse_absolute_dir("/tmp/ptree-cache"),
-            Some(PathBuf::from("/tmp/ptree-cache"))
-        );
+        assert_eq!(parse_absolute_dir("/tmp/ptree-cache"), Some(PathBuf::from("/tmp/ptree-cache")));
         assert!(parse_absolute_dir("relative/path").is_none());
         assert!(parse_absolute_dir("").is_none());
     }
@@ -817,7 +810,7 @@ mod tests {
         // Different inputs should produce different hashes
         let path = std::path::Path::new("C:\\test");
         let modified = Utc::now();
-        
+
         // Base hash
         let children = vec!["file1.txt".to_string()];
         let child_hashes = HashMap::new();
@@ -865,36 +858,36 @@ mod tests {
         let path = std::path::Path::new("C:\\test");
 
         let old_entry = DirEntry {
-            path: path.to_path_buf(),
-            name: "test".to_string(),
-            modified: Utc::now(),
-            content_hash: 12345u64,
-            children: vec!["file.txt".to_string()],
+            path:           path.to_path_buf(),
+            name:           "test".to_string(),
+            modified:       Utc::now(),
+            content_hash:   12345u64,
+            children:       vec!["file.txt".to_string()],
             symlink_target: None,
-            is_hidden: false,
-            is_dir: true,
+            is_hidden:      false,
+            is_dir:         true,
         };
 
         let new_entry_unchanged = DirEntry {
-            path: path.to_path_buf(),
-            name: "test".to_string(),
-            modified: Utc::now(),
-            content_hash: 12345u64,
-            children: vec!["file.txt".to_string()],
+            path:           path.to_path_buf(),
+            name:           "test".to_string(),
+            modified:       Utc::now(),
+            content_hash:   12345u64,
+            children:       vec!["file.txt".to_string()],
             symlink_target: None,
-            is_hidden: false,
-            is_dir: true,
+            is_hidden:      false,
+            is_dir:         true,
         };
 
         let new_entry_changed = DirEntry {
-            path: path.to_path_buf(),
-            name: "test".to_string(),
-            modified: Utc::now(),
-            content_hash: 54321u64,
-            children: vec!["file.txt".to_string(), "newfile.txt".to_string()],
+            path:           path.to_path_buf(),
+            name:           "test".to_string(),
+            modified:       Utc::now(),
+            content_hash:   54321u64,
+            children:       vec!["file.txt".to_string(), "newfile.txt".to_string()],
             symlink_target: None,
-            is_hidden: false,
-            is_dir: true,
+            is_hidden:      false,
+            is_dir:         true,
         };
 
         assert!(!has_directory_changed(&old_entry, &new_entry_unchanged), "Same hash should not indicate change");
@@ -908,25 +901,26 @@ mod tests {
         let child = std::path::PathBuf::from("/foo/bar");
         let sibling_prefix = std::path::PathBuf::from("/foobar");
 
-        let mk_entry = |path: &std::path::Path| DirEntry {
-            path: path.to_path_buf(),
-            name: path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default()
-                .to_string(),
-            modified: Utc::now(),
-            content_hash: 0,
-            children: Vec::new(),
-            symlink_target: None,
-            is_hidden: false,
-            is_dir: true,
+        let mk_entry = |path: &std::path::Path| {
+            DirEntry {
+                path:           path.to_path_buf(),
+                name:           path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                modified:       Utc::now(),
+                content_hash:   0,
+                children:       Vec::new(),
+                symlink_target: None,
+                is_hidden:      false,
+                is_dir:         true,
+            }
         };
 
         cache.entries.insert(base.clone(), mk_entry(&base));
         cache.entries.insert(child.clone(), mk_entry(&child));
-        cache.entries
-            .insert(sibling_prefix.clone(), mk_entry(&sibling_prefix));
+        cache.entries.insert(sibling_prefix.clone(), mk_entry(&sibling_prefix));
 
         cache.remove_entry(&base);
 
