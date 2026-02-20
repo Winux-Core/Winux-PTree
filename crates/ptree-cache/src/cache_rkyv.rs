@@ -215,6 +215,7 @@ mod tests {
             children: vec!["child1".to_string(), "child2".to_string()],
             symlink_target: None,
             is_hidden: false,
+            is_dir: true,
         };
 
         let serialized = bincode::serialize(&entry)?;

@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde_json::json;
 use colored::Colorize;
 use std::collections::hash_map::DefaultHasher;
@@ -146,6 +146,15 @@ pub struct DiskCache {
     /// Skip statistics: count of skipped directories by name
     #[serde(skip)]
     pub skip_stats: std::collections::HashMap<String, usize>,
+
+    /// True when cache metadata/files were loaded from disk.
+    /// Used to distinguish "lazy-loaded cache" from true first run.
+    #[serde(skip)]
+    pub has_persisted_snapshot: bool,
+
+    /// Entry count loaded from the cache index for cheap cache-hit stats.
+    #[serde(skip)]
+    pub persisted_entry_count: usize,
 }
 
 impl DiskCache {
@@ -196,6 +205,8 @@ impl DiskCache {
              flush_threshold: 5000,
              show_hidden: false,
              skip_stats: rkyv_cache.index.skip_stats.clone(),
+             has_persisted_snapshot: true,
+             persisted_entry_count: rkyv_cache.index.offsets.len(),
          })
      }
     
@@ -214,6 +225,8 @@ impl DiskCache {
             flush_threshold: 5000,
             show_hidden: false,
             skip_stats: HashMap::new(),
+            has_persisted_snapshot: false,
+            persisted_entry_count: 0,
         }
     }
     
@@ -231,12 +244,16 @@ impl DiskCache {
             flush_threshold: 5000,
             show_hidden: false,
             skip_stats: HashMap::new(),
+            has_persisted_snapshot: false,
+            persisted_entry_count: 0,
         }
     }
 
     /// Save cache using rkyv mmap format (index + data files with O(1) access)
      pub fn save(&mut self, path: &Path) -> Result<()> {
          self.flush_pending_writes();
+         self.has_persisted_snapshot = true;
+         self.persisted_entry_count = self.entries.len();
     
          let index_path = path.with_extension("idx");
          let data_path = path.with_extension("dat");
@@ -244,16 +261,30 @@ impl DiskCache {
          self.save_as_rkyv_mmap(&index_path, &data_path)?;
          Ok(())
      }
+
+    /// True if we have an existing on-disk cache snapshot.
+    pub fn has_cache_snapshot(&self) -> bool {
+        self.has_persisted_snapshot
+    }
+
+    /// Entry-count hint for cache-hit stats when entries are lazily loaded.
+    pub fn entry_count_hint(&self) -> usize {
+        if self.entries.is_empty() {
+            self.persisted_entry_count
+        } else {
+            self.entries.len()
+        }
+    }
      
      /// Save cache in mmap format (index + data files with bincode serialization)
      fn save_as_rkyv_mmap(&self, index_path: &Path, data_path: &Path) -> Result<()> {
          use crate::cache_rkyv::{RkyvDirEntry, RkyvCacheIndex};
-         use std::io::Seek;
          
          fs::create_dir_all(index_path.parent().unwrap())?;
          
          // Build index with byte offsets
          let mut rkyv_index = RkyvCacheIndex::new();
+         rkyv_index.offsets = HashMap::with_capacity(self.entries.len());
          rkyv_index.root = self.root.clone();
          rkyv_index.last_scanned_root = self.last_scanned_root.clone();
          rkyv_index.last_scan = self.last_scan;
@@ -263,7 +294,9 @@ impl DiskCache {
              rkyv_index.usn_state = self.usn_state.clone();
          }
          
-         let mut data_file = File::create(data_path)?;
+         let data_file = File::create(data_path)?;
+         let mut data_file = BufWriter::with_capacity(8 * 1024 * 1024, data_file);
+         let mut offset: u64 = 0;
          
          for (path, entry) in &self.entries {
              let rkyv_entry = RkyvDirEntry {
@@ -279,20 +312,23 @@ impl DiskCache {
              
              let serialized = bincode::serialize(&rkyv_entry)?;
              let len = serialized.len() as u32;
-             let offset = data_file.stream_position()?;
              
              rkyv_index.offsets.insert(path.clone(), offset);
              data_file.write_all(&len.to_le_bytes())?;
              data_file.write_all(&serialized)?;
+             offset += 4 + len as u64;
          }
-         data_file.sync_all()?;
+         data_file.flush()?;
+         drop(data_file);
          
          // Save index
          let index_serialized = bincode::serialize(&rkyv_index)?;
          let temp_path = index_path.with_extension("tmp");
-         let mut index_file = File::create(&temp_path)?;
+         let index_file = File::create(&temp_path)?;
+         let mut index_file = BufWriter::new(index_file);
          index_file.write_all(&index_serialized)?;
-         index_file.sync_all()?;
+         index_file.flush()?;
+         drop(index_file);
          fs::rename(&temp_path, index_path)?;
          
          Ok(())
@@ -330,7 +366,7 @@ impl DiskCache {
             return Ok(());
         }
         
-        let mut rkyv_cache = RkyvMmapCache::open(&index_path, &data_path)?;
+        let rkyv_cache = RkyvMmapCache::open(&index_path, &data_path)?;
         
         for path in paths {
             if !self.entries.contains_key(path) {
@@ -427,11 +463,8 @@ impl DiskCache {
 
     /// Remove entry and all child entries
     pub fn remove_entry(&mut self, path: &Path) {
-        self.entries.remove(path);
-        let prefix = path.to_string_lossy().to_string();
-        self.entries.retain(|k, _| {
-            !k.to_string_lossy().starts_with(&prefix) || k == path
-        });
+        // Path::starts_with checks path components, so "/foo" does not match "/foobar".
+        self.entries.retain(|k, _| !(k == path || k.starts_with(path)));
     }
 
     // ============================================================================
@@ -682,11 +715,49 @@ impl DiskCache {
 
 /// Get cache directory path
 pub fn get_cache_path() -> Result<PathBuf> {
-    let appdata = std::env::var("APPDATA")?;
-    Ok(PathBuf::from(appdata)
-        .join("ptree")
-        .join("cache")
-        .join("ptree.dat"))
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var("APPDATA")?;
+        return Ok(PathBuf::from(appdata)
+            .join("ptree")
+            .join("cache")
+            .join("ptree.dat"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Some(cache_home) = xdg_absolute_dir("XDG_CACHE_HOME") {
+            return Ok(PathBuf::from(cache_home).join("ptree").join("ptree.dat"));
+        }
+
+        if let Ok(home) = std::env::var("HOME") {
+            let home_path = PathBuf::from(home);
+            if home_path.is_absolute() {
+                return Ok(home_path.join(".cache").join("ptree").join("ptree.dat"));
+            }
+        }
+
+        Err(anyhow!(
+            "Could not determine cache directory. Set XDG_CACHE_HOME or HOME to an absolute path."
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn xdg_absolute_dir(var_name: &str) -> Option<PathBuf> {
+    let raw = std::env::var(var_name).ok()?;
+    parse_absolute_dir(&raw)
+}
+
+#[cfg(not(windows))]
+fn parse_absolute_dir(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(trimmed);
+    path.is_absolute().then_some(path)
 }
 
 /// Get cache directory path with custom directory
@@ -728,6 +799,17 @@ mod tests {
         let hash2 = compute_content_hash(path, modified, &children, &child_hashes);
 
         assert_eq!(hash1, hash2, "Identical inputs should produce identical hashes");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn test_xdg_absolute_dir_validation() {
+        assert_eq!(
+            parse_absolute_dir("/tmp/ptree-cache"),
+            Some(PathBuf::from("/tmp/ptree-cache"))
+        );
+        assert!(parse_absolute_dir("relative/path").is_none());
+        assert!(parse_absolute_dir("").is_none());
     }
 
     #[test]
@@ -790,6 +872,7 @@ mod tests {
             children: vec!["file.txt".to_string()],
             symlink_target: None,
             is_hidden: false,
+            is_dir: true,
         };
 
         let new_entry_unchanged = DirEntry {
@@ -800,6 +883,7 @@ mod tests {
             children: vec!["file.txt".to_string()],
             symlink_target: None,
             is_hidden: false,
+            is_dir: true,
         };
 
         let new_entry_changed = DirEntry {
@@ -810,9 +894,44 @@ mod tests {
             children: vec!["file.txt".to_string(), "newfile.txt".to_string()],
             symlink_target: None,
             is_hidden: false,
+            is_dir: true,
         };
 
         assert!(!has_directory_changed(&old_entry, &new_entry_unchanged), "Same hash should not indicate change");
         assert!(has_directory_changed(&old_entry, &new_entry_changed), "Different hash should indicate change");
+    }
+
+    #[test]
+    fn test_remove_entry_uses_path_components() {
+        let mut cache = DiskCache::new_empty();
+        let base = std::path::PathBuf::from("/foo");
+        let child = std::path::PathBuf::from("/foo/bar");
+        let sibling_prefix = std::path::PathBuf::from("/foobar");
+
+        let mk_entry = |path: &std::path::Path| DirEntry {
+            path: path.to_path_buf(),
+            name: path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            modified: Utc::now(),
+            content_hash: 0,
+            children: Vec::new(),
+            symlink_target: None,
+            is_hidden: false,
+            is_dir: true,
+        };
+
+        cache.entries.insert(base.clone(), mk_entry(&base));
+        cache.entries.insert(child.clone(), mk_entry(&child));
+        cache.entries
+            .insert(sibling_prefix.clone(), mk_entry(&sibling_prefix));
+
+        cache.remove_entry(&base);
+
+        assert!(!cache.entries.contains_key(&base));
+        assert!(!cache.entries.contains_key(&child));
+        assert!(cache.entries.contains_key(&sibling_prefix));
     }
 }

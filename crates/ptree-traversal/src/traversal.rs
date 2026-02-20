@@ -2,7 +2,7 @@ use ptree_cache::{DiskCache, DirEntry};
 use ptree_core::Args;
 use std::collections::VecDeque;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, Duration};
 use chrono::Utc;
@@ -72,15 +72,31 @@ pub struct TraversalState {
 /// 6. Initialize work queue with drive root
 /// 7. Spawn worker threads that process queue in parallel (iterative DFS)
 /// 8. Flush all pending writes and save cache atomically
-pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args) -> Result<DebugInfo> {
+pub fn traverse_disk(
+    drive: &char,
+    cache: &mut DiskCache,
+    args: &Args,
+    cache_path: &Path,
+) -> Result<DebugInfo> {
+    #[cfg(not(windows))]
+    let _ = drive;
+
     // Determine scan root: current directory by default, full drive with --force
     let scan_root = if args.force {
-        // --force: scan full drive
-        let root = PathBuf::from(format!("{}:\\", drive));
-        if !root.exists() {
-            anyhow::bail!("Drive {} does not exist", drive);
+        // --force: scan full filesystem root for the current platform
+        #[cfg(windows)]
+        {
+            let root = PathBuf::from(format!("{}:\\", drive));
+            if !root.exists() {
+                anyhow::bail!("Drive {} does not exist", drive);
+            }
+            root
         }
-        root
+
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/")
+        }
     } else {
         // Default: scan current directory and subdirectories
         std::env::current_dir()?
@@ -94,7 +110,7 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args) -> Result
         anyhow::bail!("Scan root is not a directory: {}", scan_root.display());
     }
 
-    let is_first_run = cache.entries.is_empty();
+    let is_first_run = !cache.has_cache_snapshot();
     cache.root = scan_root.clone();
 
     // Ensure root directory is added to cache (important for --no-cache mode)
@@ -135,7 +151,11 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args) -> Result
     };
     
     if should_use_cache {
-        let total_files = cache.entries.values().map(|e| e.children.len()).sum();
+        let total_files = if cache.entries.is_empty() {
+            0
+        } else {
+            cache.entries.values().map(|e| e.children.len()).sum()
+        };
         return Ok(DebugInfo {
             is_first_run: false,
             scan_root: cache.root.clone(),
@@ -143,7 +163,7 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args) -> Result
             traversal_time: Duration::from_secs(0),
             save_time: Duration::from_secs(0),
             cache_index_time: Duration::from_secs(0),
-            total_dirs: cache.entries.len(),
+            total_dirs: cache.entry_count_hint(),
             total_files,
             threads_used: 0,
         });
@@ -153,8 +173,8 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args) -> Result
     // Prepare for Traversal
     // ============================================================================
     
-    // Note: Incremental filtering is now handled in main.rs via the --incremental flag
-    // This allows cleaner separation between incremental (USN Journal) and full scan (DFS)
+    // Incremental directory filtering is currently disabled.
+    // Traversal always performs full DFS for refresh runs.
     let changed_dirs_filter: Option<std::collections::HashSet<String>> = None;
 
     // ============================================================================
@@ -177,7 +197,16 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args) -> Result
     // Create Thread Pool & Determine Thread Count
     // ============================================================================
 
-    let num_threads = args.threads.unwrap_or_else(|| num_cpus::get() * 2);
+    let num_threads = args.threads.unwrap_or_else(|| {
+        let cores = num_cpus::get().max(1);
+        if args.force {
+            cores
+        } else {
+            // Normal (non-force) scans are often small and lock-heavy.
+            // Keep default worker count low to reduce contention.
+            cores.min(4)
+        }
+    });
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
@@ -238,19 +267,13 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args) -> Result
     };
     cache.skip_stats = skip_stats;
 
-    let cache_path = if let Some(ref custom_dir) = args.cache_dir {
-        ptree_cache::get_cache_path_custom(Some(custom_dir))?
-    } else {
-        ptree_cache::get_cache_path()?
-    };
-    
+    let cache_index_elapsed = cache_index_start.elapsed();
+
     let save_start = Instant::now();
     if !args.no_cache {
         cache.save(&cache_path)?;
     }
     let save_elapsed = save_start.elapsed();
-    
-    let cache_index_elapsed = cache_index_start.elapsed();
 
     // ============================================================================
     // Return Debug Info
