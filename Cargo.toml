@@ -5,6 +5,7 @@ members = [".", "crates/ptree-core", "crates/ptree-cache", "crates/ptree-schedul
 name = "ptree"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "ptree"
@@ -21,7 +22,7 @@ anyhow = "1.0"
 atty = "0.2"
 
 [features]
-default = ["scheduler", "incremental"]
+default = ["scheduler"]
 scheduler = ["ptree-scheduler"]
 incremental = ["ptree-incremental"]
 
@@ -36,4 +37,3 @@ harness = false
 lto = true
 codegen-units = 1
 opt-level = 3
-
