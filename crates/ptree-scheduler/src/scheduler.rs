@@ -1,12 +1,11 @@
-/// Scheduler module for automatic cache updates
-/// Supports Windows Task Scheduler and Unix cron
-
-use anyhow::{Result, anyhow};
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
+/// Scheduler module for automatic cache updates
+/// Supports Windows Task Scheduler and Unix cron
+use anyhow::{anyhow, Result};
 
 /// Get the ptree executable path
 fn get_ptree_path() -> Result<PathBuf> {
@@ -140,28 +139,21 @@ pub fn install_scheduler() -> Result<()> {
     let exe_path_str = exe_path.display().to_string();
 
     // Check if crontab is available
-    let crontab_check = Command::new("which")
-        .arg("crontab")
-        .output();
+    let crontab_check = Command::new("which").arg("crontab").output();
 
     if crontab_check.is_err() || !crontab_check?.status.success() {
-        return Err(anyhow!(
-            "crontab not found. Please install cron: sudo apt-get install cron (Ubuntu/Debian)"
-        ));
+        return Err(anyhow!("crontab not found. Please install cron: sudo apt-get install cron (Ubuntu/Debian)"));
     }
 
     // Get current crontab
-    let current_crontab = Command::new("crontab")
-        .arg("-l")
-        .output()
-        .unwrap_or_else(|_| {
-            // No existing crontab
-            std::process::Output {
-                status: std::process::ExitStatus::from_raw(1),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            }
-        });
+    let current_crontab = Command::new("crontab").arg("-l").output().unwrap_or_else(|_| {
+        // No existing crontab
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(1),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    });
 
     let mut crontab_content = if current_crontab.status.success() {
         String::from_utf8_lossy(&current_crontab.stdout).to_string()
@@ -187,7 +179,10 @@ pub fn install_scheduler() -> Result<()> {
 
     {
         use std::io::Write;
-        let stdin = child.stdin.as_mut().ok_or_else(|| anyhow!("Failed to open crontab stdin"))?;
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("Failed to open crontab stdin"))?;
         stdin.write_all(crontab_content.as_bytes())?;
     }
 
@@ -210,16 +205,13 @@ pub fn uninstall_scheduler() -> Result<()> {
     let exe_path_str = exe_path.display().to_string();
 
     // Get current crontab
-    let current_crontab = Command::new("crontab")
-        .arg("-l")
-        .output()
-        .unwrap_or_else(|_| {
-            std::process::Output {
-                status: std::process::ExitStatus::from_raw(1),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            }
-        });
+    let current_crontab = Command::new("crontab").arg("-l").output().unwrap_or_else(|_| {
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(1),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    });
 
     if !current_crontab.status.success() {
         println!("✗ No crontab found");
@@ -249,7 +241,10 @@ pub fn uninstall_scheduler() -> Result<()> {
 
     {
         use std::io::Write;
-        let stdin = child.stdin.as_mut().ok_or_else(|| anyhow!("Failed to open crontab stdin"))?;
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("Failed to open crontab stdin"))?;
         stdin.write_all(new_crontab.as_bytes())?;
     }
 
@@ -271,16 +266,13 @@ pub fn check_scheduler_status() -> Result<()> {
     let exe_path_str = exe_path.display().to_string();
 
     // Get current crontab
-    let output = Command::new("crontab")
-        .arg("-l")
-        .output()
-        .unwrap_or_else(|_| {
-            std::process::Output {
-                status: std::process::ExitStatus::from_raw(1),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            }
-        });
+    let output = Command::new("crontab").arg("-l").output().unwrap_or_else(|_| {
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(1),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    });
 
     let crontab_content = String::from_utf8_lossy(&output.stdout);
 

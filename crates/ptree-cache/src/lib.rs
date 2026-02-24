@@ -5,4 +5,12 @@ pub mod cache;
 // pub mod cache_opt;
 pub mod cache_rkyv;
 
-pub use cache::{DiskCache, DirEntry, USNJournalState, compute_content_hash, has_directory_changed, get_cache_path, get_cache_path_custom};
+pub use cache::{
+    compute_content_hash,
+    get_cache_path,
+    get_cache_path_custom,
+    has_directory_changed,
+    DirEntry,
+    DiskCache,
+    USNJournalState,
+};

@@ -1,18 +1,14 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 /// Create a test directory structure for benchmarking
 fn create_test_tree(root: &Path, depth: usize, breadth: usize) -> std::io::Result<usize> {
     let mut count = 0;
 
-    fn recursive_create(
-        parent: &Path,
-        depth: usize,
-        breadth: usize,
-        count: &mut usize,
-    ) -> std::io::Result<()> {
+    fn recursive_create(parent: &Path, depth: usize, breadth: usize, count: &mut usize) -> std::io::Result<()> {
         if depth == 0 {
             return Ok(());
         }
@@ -48,29 +44,25 @@ fn bench_tree_traversal(c: &mut Criterion) {
 
         let dir_count = create_test_tree(&test_root, *depth, *breadth).unwrap();
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{} dirs", dir_count)),
-            &dir_count,
-            |b, _| {
-                b.iter(|| {
-                    // Simple traversal counting directories
-                    let mut count = 0;
-                    fn walk(path: &Path, count: &mut usize) -> std::io::Result<()> {
-                        for entry in fs::read_dir(path)? {
-                            let entry = entry?;
-                            let path = entry.path();
-                            if path.is_dir() {
-                                *count += 1;
-                                walk(&path, count)?;
-                            }
+        group.bench_with_input(BenchmarkId::from_parameter(format!("{} dirs", dir_count)), &dir_count, |b, _| {
+            b.iter(|| {
+                // Simple traversal counting directories
+                let mut count = 0;
+                fn walk(path: &Path, count: &mut usize) -> std::io::Result<()> {
+                    for entry in fs::read_dir(path)? {
+                        let entry = entry?;
+                        let path = entry.path();
+                        if path.is_dir() {
+                            *count += 1;
+                            walk(&path, count)?;
                         }
-                        Ok(())
                     }
-                    walk(&test_root, &mut count).ok();
-                    black_box(count)
-                })
-            },
-        );
+                    Ok(())
+                }
+                walk(&test_root, &mut count).ok();
+                black_box(count)
+            })
+        });
     }
 
     group.finish();
@@ -83,21 +75,15 @@ fn bench_directory_sorting(c: &mut Criterion) {
 
     // Generate random names of varying quantities
     for size in [10, 50, 100, 500, 1000].iter() {
-        let names: Vec<String> = (0..*size)
-            .map(|i| format!("directory_name_{:04}", i))
-            .collect();
+        let names: Vec<String> = (0..*size).map(|i| format!("directory_name_{:04}", i)).collect();
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{} items", size)),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    let mut sorted = black_box(names.clone());
-                    sorted.sort();
-                    sorted
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(format!("{} items", size)), size, |b, _| {
+            b.iter(|| {
+                let mut sorted = black_box(names.clone());
+                sorted.sort();
+                sorted
+            })
+        });
     }
 
     group.finish();
@@ -108,34 +94,24 @@ fn bench_parallel_sorting(c: &mut Criterion) {
     let mut group = c.benchmark_group("parallel_sorting");
 
     for size in [50, 100, 500, 1000, 5000].iter() {
-        let mut names: Vec<String> = (0..*size)
-            .map(|i| format!("directory_name_{:04}", i))
-            .collect();
+        let mut names: Vec<String> = (0..*size).map(|i| format!("directory_name_{:04}", i)).collect();
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("sequential_{}", size)),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    let mut sorted = black_box(names.clone());
-                    sorted.sort();
-                    sorted
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(format!("sequential_{}", size)), size, |b, _| {
+            b.iter(|| {
+                let mut sorted = black_box(names.clone());
+                sorted.sort();
+                sorted
+            })
+        });
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("parallel_{}", size)),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    use rayon::slice::ParallelSliceMut;
-                    let mut sorted = black_box(names.clone());
-                    sorted.par_sort();
-                    sorted
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(format!("parallel_{}", size)), size, |b, _| {
+            b.iter(|| {
+                use rayon::slice::ParallelSliceMut;
+                let mut sorted = black_box(names.clone());
+                sorted.par_sort();
+                sorted
+            })
+        });
     }
 
     group.finish();
@@ -151,34 +127,22 @@ fn bench_cache_operations(c: &mut Criterion) {
     for size in [100, 1000, 10000].iter() {
         let mut entries = HashMap::new();
         for i in 0..*size {
-            entries.insert(
-                PathBuf::from(format!("C:\\path\\to\\dir\\{}", i)),
-                format!("dir_{}", i),
-            );
+            entries.insert(PathBuf::from(format!("C:\\path\\to\\dir\\{}", i)), format!("dir_{}", i));
         }
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("serialize_{}", size)),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    let _serialized = bincode::serialize(black_box(&entries)).unwrap();
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(format!("serialize_{}", size)), size, |b, _| {
+            b.iter(|| {
+                let _serialized = bincode::serialize(black_box(&entries)).unwrap();
+            })
+        });
 
         let serialized = bincode::serialize(&entries).unwrap();
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("deserialize_{}", size)),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    let _deserialized: HashMap<PathBuf, String> =
-                        bincode::deserialize(black_box(&serialized)).unwrap();
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(format!("deserialize_{}", size)), size, |b, _| {
+            b.iter(|| {
+                let _deserialized: HashMap<PathBuf, String> = bincode::deserialize(black_box(&serialized)).unwrap();
+            })
+        });
     }
 
     group.finish();
@@ -202,19 +166,15 @@ fn bench_file_enumeration(c: &mut Criterion) {
             fs::File::create(test_dir.join(format!("file_{:04}.txt", i))).unwrap();
         }
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{} files", file_count)),
-            file_count,
-            |b, _| {
-                b.iter(|| {
-                    let mut count = 0;
-                    for _entry in fs::read_dir(black_box(&test_dir)).unwrap() {
-                        count += 1;
-                    }
-                    count
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(format!("{} files", file_count)), file_count, |b, _| {
+            b.iter(|| {
+                let mut count = 0;
+                for _entry in fs::read_dir(black_box(&test_dir)).unwrap() {
+                    count += 1;
+                }
+                count
+            })
+        });
     }
 
     group.finish();

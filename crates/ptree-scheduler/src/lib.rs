@@ -1,3 +1,3 @@
 pub mod scheduler;
 
-pub use scheduler::{install_scheduler, uninstall_scheduler, check_scheduler_status};
+pub use scheduler::{check_scheduler_status, install_scheduler, uninstall_scheduler};
