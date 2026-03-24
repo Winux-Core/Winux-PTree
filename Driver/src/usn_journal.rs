@@ -1,20 +1,22 @@
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use chrono::{DateTime, Utc};
-use crate::error::{DriverError, DriverResult};
-
+use std::collections::HashMap;
 #[cfg(windows)]
 use std::mem;
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 #[cfg(windows)]
-use winapi::um::fileapi::{CreateFileW, OPEN_EXISTING};
-#[cfg(windows)]
-use winapi::um::winnt::{FILE_SHARE_READ, GENERIC_READ};
+use winapi::ctypes::c_void;
 #[cfg(windows)]
 use winapi::shared::minwindef::FALSE;
 #[cfg(windows)]
-use winapi::um::handleapi::{INVALID_HANDLE_VALUE, CloseHandle};
+use winapi::um::fileapi::{CreateFileW, OPEN_EXISTING};
 #[cfg(windows)]
-use winapi::ctypes::c_void;
+use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+#[cfg(windows)]
+use winapi::um::winnt::{FILE_SHARE_READ, GENERIC_READ};
+
+use crate::error::{DriverError, DriverResult};
 
 // ============================================================================
 // Change Record Types
@@ -114,9 +116,9 @@ pub struct USNJournalState {
 impl Default for USNJournalState {
     fn default() -> Self {
         USNJournalState {
-            last_usn: 0,
-            journal_id: 0,
-            last_read: Utc::now(),
+            last_usn:     0,
+            journal_id:   0,
+            last_read:    Utc::now(),
             drive_letter: 'C',
             change_count: 0,
         }
@@ -129,9 +131,10 @@ impl Default for USNJournalState {
 
 /// Tracks changes to a volume via the NTFS USN Journal
 pub struct USNTracker {
-    root: PathBuf,
-    state: USNJournalState,
-    buffer: Vec<u8>,
+    root:        PathBuf,
+    state:       USNJournalState,
+    buffer:      Vec<u8>,
+    known_paths: HashMap<u64, PathBuf>,
 }
 
 impl USNTracker {
@@ -141,6 +144,7 @@ impl USNTracker {
             root: PathBuf::from(format!("{}:\\", drive_letter)),
             state,
             buffer: vec![0u8; 65536], // 64KB buffer for USN records
+            known_paths: HashMap::new(),
         }
     }
 
@@ -159,8 +163,8 @@ impl USNTracker {
     /// Get current journal information
     #[cfg(windows)]
     pub fn get_journal_data(&self) -> DriverResult<JournalData> {
-        use winapi::um::winioctl::FSCTL_QUERY_USN_JOURNAL;
         use winapi::shared::winerror::ERROR_JOURNAL_NOT_ACTIVE;
+        use winapi::um::winioctl::FSCTL_QUERY_USN_JOURNAL;
 
         let mut journal_data = unsafe { mem::zeroed::<JournalData>() };
         let mut bytes_returned = 0u32;
@@ -185,9 +189,7 @@ impl USNTracker {
         if result == FALSE {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(ERROR_JOURNAL_NOT_ACTIVE as i32) {
-                return Err(DriverError::JournalNotFound(
-                    "USN Journal is not active on this volume".to_string(),
-                ));
+                return Err(DriverError::JournalNotFound("USN Journal is not active on this volume".to_string()));
             }
             return Err(DriverError::Windows(err.to_string()));
         }
@@ -218,12 +220,12 @@ impl USNTracker {
         use winapi::um::winioctl::FSCTL_READ_USN_JOURNAL;
 
         let mut read_data = ReadUsnJournalData {
-            start_usn: self.state.last_usn,
-            reason_mask: 0xFFFFFFFF, // All reasons
+            start_usn:            self.state.last_usn,
+            reason_mask:          0xFFFFFFFF, // All reasons
             return_only_on_close: FALSE,
-            timeout: 0,
-            max_versions: 0,
-            max_size: self.buffer.len() as u32,
+            timeout:              0,
+            max_versions:         0,
+            max_size:             self.buffer.len() as u32,
         };
 
         let mut bytes_returned = 0u32;
@@ -245,9 +247,7 @@ impl USNTracker {
         unsafe { CloseHandle(handle) };
 
         if result == FALSE {
-            return Err(DriverError::Windows(
-                std::io::Error::last_os_error().to_string(),
-            ));
+            return Err(DriverError::Windows(std::io::Error::last_os_error().to_string()));
         }
 
         // Parse the buffer into USN records
@@ -293,7 +293,7 @@ impl USNTracker {
     }
 
     /// Parse a single USN record
-    fn parse_single_record(&self, buffer: &[u8]) -> DriverResult<UsnRecord> {
+    fn parse_single_record(&mut self, buffer: &[u8]) -> DriverResult<UsnRecord> {
         if buffer.len() < 98 {
             // Minimum USN_RECORD_V3 size
             return Err(DriverError::Parse("Record too small".to_string()));
@@ -304,36 +304,24 @@ impl USNTracker {
         let _major_version = u16::from_le_bytes([buffer[4], buffer[5]]);
         let _minor_version = u16::from_le_bytes([buffer[6], buffer[7]]);
         let file_ref = u64::from_le_bytes([
-            buffer[8], buffer[9], buffer[10], buffer[11], buffer[12], buffer[13],
-            buffer[14], buffer[15],
+            buffer[8], buffer[9], buffer[10], buffer[11], buffer[12], buffer[13], buffer[14], buffer[15],
         ]);
         let parent_ref = u64::from_le_bytes([
-            buffer[16], buffer[17], buffer[18], buffer[19], buffer[20], buffer[21],
-            buffer[22], buffer[23],
+            buffer[16], buffer[17], buffer[18], buffer[19], buffer[20], buffer[21], buffer[22], buffer[23],
         ]);
         let usn = i64::from_le_bytes([
-            buffer[24], buffer[25], buffer[26], buffer[27], buffer[28], buffer[29],
-            buffer[30], buffer[31],
+            buffer[24], buffer[25], buffer[26], buffer[27], buffer[28], buffer[29], buffer[30], buffer[31],
         ]);
 
         let timestamp_raw = i64::from_le_bytes([
-            buffer[32], buffer[33], buffer[34], buffer[35], buffer[36], buffer[37],
-            buffer[38], buffer[39],
+            buffer[32], buffer[33], buffer[34], buffer[35], buffer[36], buffer[37], buffer[38], buffer[39],
         ]);
         let timestamp = Self::filetime_to_datetime(timestamp_raw);
 
-        let reason = u32::from_le_bytes([
-            buffer[40], buffer[41], buffer[42], buffer[43],
-        ]);
-        let _attributes = u32::from_le_bytes([
-            buffer[44], buffer[45], buffer[46], buffer[47],
-        ]);
-        let _file_version_number = u32::from_le_bytes([
-            buffer[48], buffer[49], buffer[50], buffer[51],
-        ]);
-        let _file_strong_integrity = u32::from_le_bytes([
-            buffer[52], buffer[53], buffer[54], buffer[55],
-        ]);
+        let reason = u32::from_le_bytes([buffer[40], buffer[41], buffer[42], buffer[43]]);
+        let _attributes = u32::from_le_bytes([buffer[44], buffer[45], buffer[46], buffer[47]]);
+        let _file_version_number = u32::from_le_bytes([buffer[48], buffer[49], buffer[50], buffer[51]]);
+        let _file_strong_integrity = u32::from_le_bytes([buffer[52], buffer[53], buffer[54], buffer[55]]);
 
         let filename_len = u16::from_le_bytes([buffer[56], buffer[57]]) as usize;
         let filename_offset = u16::from_le_bytes([buffer[58], buffer[59]]) as usize;
@@ -350,8 +338,16 @@ impl USNTracker {
             String::new()
         };
 
+        let path = self
+            .known_paths
+            .get(&parent_ref)
+            .cloned()
+            .unwrap_or_else(|| self.root.clone())
+            .join(&filename);
+        self.known_paths.insert(file_ref, path.clone());
+
         Ok(UsnRecord {
-            path: self.root.join(&filename),
+            path,
             change_type: ChangeType::from_usn_reason(reason),
             file_ref,
             parent_ref,
@@ -398,10 +394,7 @@ impl USNTracker {
     #[cfg(windows)]
     fn open_volume_handle(&self) -> DriverResult<*mut c_void> {
         let volume_path = format!("\\\\.\\{}:", self.root.display().to_string().chars().next().unwrap());
-        let wide: Vec<u16> = volume_path
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let wide: Vec<u16> = volume_path.encode_utf16().chain(std::iter::once(0)).collect();
 
         let handle = unsafe {
             CreateFileW(
@@ -416,9 +409,7 @@ impl USNTracker {
         };
 
         if handle == INVALID_HANDLE_VALUE {
-            return Err(DriverError::InvalidHandle(
-                format!("Failed to open volume: {}", self.root.display()),
-            ));
+            return Err(DriverError::InvalidHandle(format!("Failed to open volume: {}", self.root.display())));
         }
 
         Ok(handle as *mut c_void)
@@ -443,13 +434,13 @@ impl USNTracker {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct JournalData {
-    pub usn_journal_id: u64,
-    pub first_usn: i64,
-    pub next_usn: i64,
+    pub usn_journal_id:   u64,
+    pub first_usn:        i64,
+    pub next_usn:         i64,
     pub lowest_valid_usn: i64,
-    pub max_usn: i64,
-    pub max_size: u64,
-    pub allocation_size: u64,
+    pub max_usn:          i64,
+    pub max_size:         u64,
+    pub allocation_size:  u64,
 }
 
 impl Default for JournalData {
@@ -462,12 +453,12 @@ impl Default for JournalData {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ReadUsnJournalData {
-    pub start_usn: i64,
-    pub reason_mask: u32,
+    pub start_usn:            i64,
+    pub reason_mask:          u32,
     pub return_only_on_close: i32,
-    pub timeout: u32,
-    pub max_versions: u32,
-    pub max_size: u32,
+    pub timeout:              u32,
+    pub max_versions:         u32,
+    pub max_size:             u32,
 }
 
 #[cfg(test)]

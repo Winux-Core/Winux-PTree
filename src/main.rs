@@ -1,3 +1,4 @@
+use std::io::{self, BufWriter, Write};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -57,7 +58,7 @@ fn main() -> Result<()> {
     // Traverse Disk & Update Cache
     // ========================================================================
 
-    let debug_info = traverse_disk(&args.drive, &mut cache, &args, &cache_path)?;
+    let mut debug_info = traverse_disk(&args.drive, &mut cache, &args, &cache_path)?;
 
     // ========================================================================
     // Output Results (with lazy-loading for cold-start)
@@ -65,32 +66,64 @@ fn main() -> Result<()> {
 
     cache.show_hidden = args.hidden;
 
-    if cache.entries.is_empty() {
-        let _ = cache.load_all_entries_lazy(&cache_path);
+    // Cache hits start with only the index in memory, so expand just the visible tree.
+    if !args.quiet && debug_info.cache_used {
+        let lazy_load_start = Instant::now();
+        cache.load_visible_entries_lazy(&cache_path, args.max_depth)?;
+        debug_info.lazy_load_time = lazy_load_start.elapsed();
+        debug_info.total_dirs = if args.max_depth == Some(0) && !cache.root.as_os_str().is_empty() {
+            1
+        } else {
+            cache.entries.len()
+        };
+        debug_info.total_files = cache
+            .entries
+            .get(&cache.root)
+            .map(|entry| entry.file_count)
+            .unwrap_or_else(|| cache.file_count_hint());
     }
 
-    let formatting_start = Instant::now();
-    let output = if !args.quiet {
-        Some(match args.format {
+    let mut formatting_elapsed = std::time::Duration::ZERO;
+    let mut output_elapsed = std::time::Duration::ZERO;
+
+    if !args.quiet {
+        // Buffer stdout to minimize write(2) syscalls; 8 MiB keeps flushes rare even for huge trees.
+        let stdout = io::stdout();
+        let mut writer = BufWriter::with_capacity(8 << 20, stdout.lock());
+
+        match args.format {
             OutputFormat::Tree => {
+                // Treat the whole streaming render as output time (formatting is negligible compared to I/O)
+                let output_start = Instant::now();
                 if use_colors {
-                    cache.build_colored_tree_output_with_depth(args.max_depth)?
+                    cache.write_colored_tree_output_with_options(
+                        &mut writer,
+                        args.max_depth,
+                        args.size,
+                        args.file_count,
+                    )?
                 } else {
-                    cache.build_tree_output_with_depth(args.max_depth)?
+                    cache.write_tree_output_with_options(&mut writer, args.max_depth, args.size, args.file_count)?
                 }
+                writer.flush()?;
+                output_elapsed = output_start.elapsed();
             }
-            OutputFormat::Json => cache.build_json_output_with_depth(args.max_depth)?,
-        })
-    } else {
-        None
-    };
-    let formatting_elapsed = formatting_start.elapsed();
+            OutputFormat::Json => {
+                // JSON still builds a String first, so time formatting separately from output write.
+                let formatting_start = Instant::now();
+                let json = cache.build_json_output_with_options(args.max_depth, args.size, args.file_count)?;
+                formatting_elapsed = formatting_start.elapsed();
 
-    let output_start = Instant::now();
-    if let Some(output) = output {
-        println!("{}", output);
+                let output_start = Instant::now();
+                writer.write_all(json.as_bytes())?;
+                if !json.ends_with('\n') {
+                    writer.write_all(b"\n")?;
+                }
+                writer.flush()?;
+                output_elapsed = output_start.elapsed();
+            }
+        }
     }
-    let output_elapsed = output_start.elapsed();
 
     // ========================================================================
     // Skip Statistics (if requested)
@@ -146,6 +179,8 @@ fn print_debug_summary(
             "FULL DISK SCAN (First Run)"
         } else if debug_info.cache_used {
             "CACHED (< 1 hour)"
+        } else if debug_info.incremental_refresh {
+            "INCREMENTAL REFRESH"
         } else {
             "PARTIAL SCAN (Current Dir)"
         }
@@ -157,6 +192,9 @@ fn print_debug_summary(
     eprintln!("{:<40} {}", "Threads Used:", debug_info.threads_used);
 
     eprintln!("\n{:<40} {}", "Cache Load Time:", format_duration(cache_load_time));
+    if debug_info.cache_used || !debug_info.lazy_load_time.is_zero() {
+        eprintln!("{:<40} {}", "Lazy Load Time:", format_duration(debug_info.lazy_load_time));
+    }
     if !debug_info.cache_used {
         eprintln!("{:<40} {}", "Traversal Time:", format_duration(debug_info.traversal_time));
         eprintln!("{:<40} {}", "Cache Index Time:", format_duration(debug_info.cache_index_time));

@@ -17,7 +17,6 @@ pub struct LimcodeDirEntry {
     pub modified_timestamp: i64,  // DateTime<Utc> not Archive-compatible, use i64
     pub size: u64,
     pub children: Vec<String>,
-    pub symlink_target: Option<String>,  // Use String instead of PathBuf
     pub is_hidden: bool,
 }
 
@@ -202,7 +201,6 @@ impl LimcodeCache {
                     modified,
                     size: entry.size,
                     children: entry.children,
-                    symlink_target: entry.symlink_target.map(PathBuf::from),
                     is_hidden: entry.is_hidden,
                 },
             );
@@ -265,7 +263,6 @@ mod tests {
             modified_timestamp: Utc::now().timestamp(),
             size: 1024,
             children: vec!["child1".to_string(), "child2".to_string()],
-            symlink_target: None,
             is_hidden: false,
         };
 

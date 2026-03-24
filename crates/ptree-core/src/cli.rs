@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use clap::Parser;
 
@@ -48,7 +49,7 @@ impl std::str::FromStr for ColorMode {
     }
 }
 
-/// ptree - A cache-first disk tree traversal tool for Windows
+/// ptree - A cache-first disk tree traversal tool for Windows and Unix
 ///
 /// Scans disk directories with multi-threaded parallelism and caches results
 /// for near-instant subsequent runs.
@@ -59,6 +60,10 @@ pub struct Args {
     // ========================================================================
     // Drive & Scanning Options
     // ========================================================================
+    /// Optional path to scan (overrides drive); supports ~ expansion
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
+
     /// Drive letter (e.g., C, D)
     #[arg(short, long, default_value = "C")]
     pub drive: char,
@@ -127,7 +132,7 @@ pub struct Args {
     // ========================================================================
     // Performance Options
     // ========================================================================
-    /// Maximum threads (default: physical cores * 2, capped at 3x cores)
+    /// Maximum worker threads (default: up to 4, or CPU cores with --force)
     #[arg(short = 'j', long)]
     pub threads: Option<usize>,
 

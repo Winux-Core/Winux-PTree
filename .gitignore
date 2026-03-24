@@ -1,7 +1,7 @@
 /target
 *.exe
 *.dll
-
+*.txt
 /tools/ptree-update-prompt/target/
 tools/ptree-update-prompt/target/*
 tools/ptree-update-prompt/target/

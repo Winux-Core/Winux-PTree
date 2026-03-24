@@ -10,7 +10,7 @@ struct UpdatePromptApp {
 impl UpdatePromptApp {
     fn new(repo_root: String) -> Self {
         let quoted_repo = shell_quote(&repo_root);
-        let update_command = format!("cd {} && bash scripts/update-driver.sh", quoted_repo);
+        let update_command = format!("cd {} && bash scripts/linux/update-driver.sh", quoted_repo);
         Self {
             repo_root,
             update_command,

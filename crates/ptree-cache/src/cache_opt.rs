@@ -240,7 +240,6 @@ mod tests {
                 modified: chrono::Utc::now(),
                 size: 1024,
                 children: vec!["child".to_string()],
-                symlink_target: None,
                 is_hidden: false,
             },
         );

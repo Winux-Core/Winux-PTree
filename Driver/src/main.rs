@@ -1,17 +1,15 @@
 // ptree-driver: Windows service for real-time file system change tracking
 // Provides incremental cache updates via NTFS USN Journal monitoring
 
-use ptree_driver::{PtreeService, ServiceConfig, DRIVER_VERSION};
 use std::env;
 
 #[cfg(windows)]
 use ptree_driver::registration;
+use ptree_driver::{PtreeService, ServiceConfig, DRIVER_VERSION};
 
 fn main() {
     // Initialize logging
-    env_logger::Builder::from_default_env()
-        .format_timestamp_millis()
-        .init();
+    env_logger::Builder::from_default_env().format_timestamp_millis().init();
 
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
@@ -41,7 +39,7 @@ fn main() {
 /// Run the service in foreground
 fn run_service() {
     println!("ptree-driver v{} - Starting", DRIVER_VERSION);
-    
+
     // Create service with default config
     let config = ServiceConfig::default();
     let mut service = PtreeService::new(config);
@@ -71,7 +69,7 @@ fn run_service() {
 #[cfg(windows)]
 fn register_service() {
     println!("ptree-driver v{} - Registering as Windows service", DRIVER_VERSION);
-    
+
     // Get current executable path
     match env::current_exe() {
         Ok(exe_path) => {
@@ -108,7 +106,7 @@ fn register_service() {
 #[cfg(windows)]
 fn unregister_service() {
     println!("ptree-driver v{} - Unregistering Windows service", DRIVER_VERSION);
-    
+
     match registration::unregister_service() {
         Ok(_) => {
             println!("✓ Service unregistered successfully");
@@ -131,7 +129,7 @@ fn unregister_service() {
 #[cfg(windows)]
 fn start_service() {
     println!("ptree-driver v{} - Starting service", DRIVER_VERSION);
-    
+
     match registration::start_service() {
         Ok(_) => {
             println!("✓ Service started successfully");
@@ -154,7 +152,7 @@ fn start_service() {
 #[cfg(windows)]
 fn stop_service() {
     println!("ptree-driver v{} - Stopping service", DRIVER_VERSION);
-    
+
     match registration::stop_service() {
         Ok(_) => {
             println!("✓ Service stopped successfully");

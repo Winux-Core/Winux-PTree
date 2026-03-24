@@ -22,6 +22,10 @@ parking_lot = "0.12"
 log = "0.4"
 env_logger = "0.11"
 ctrlc = "3.4"
+ptree-core = { path = "../crates/ptree-core" }
+ptree-cache = { path = "../crates/ptree-cache", default-features = false, features = ["std"] }
+ptree-traversal = { path = "../crates/ptree-traversal", default-features = false, features = ["std"] }
+ptree-incremental = { path = "../crates/ptree-incremental" }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = [

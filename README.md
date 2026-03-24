@@ -20,7 +20,9 @@ ptree (binary)
 ├── ptree-core       (CLI, types, error handling)
 ├── ptree-cache      (disk cache, serialization)
 ├── ptree-traversal  (parallel DFS traversal)
-├── ptree-scheduler  (scheduled refresh)
+├── ptree-scheduler  (scheduled refresh facade)
+│   ├── ptree-scheduler-windows (Windows Task Scheduler impl)
+│   └── ptree-scheduler-unix    (cron-based impl)
 └── ptree-incremental (planned incremental backend)
 ```
 
@@ -50,7 +52,7 @@ The release binary will be at `target/release/ptree`.
 ### Linux Install (systemd watcher + persistent command)
 
 ```bash
-bash scripts/install-linux.sh
+sudo bash scripts/linux/install-linux.sh
 ```
 
 This installer will:
@@ -73,7 +75,7 @@ sudo systemctl restart ptree-driver.service
 Update after pulling/changing code:
 
 ```bash
-bash scripts/update-driver.sh
+sudo bash scripts/linux/update-driver.sh
 ```
 
 Auto-update configuration:
@@ -93,6 +95,19 @@ Service configuration file:
 /etc/default/ptree-driver
 ```
 
+### Windows Install (scheduled refresh optional)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/windows/install-windows.ps1
+# Add -RegisterScheduledTask to set up a 30-minute refresh
+```
+
+Update after pulling/changing code:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/windows/update-driver.ps1
+```
+
 Performance tuning:
 - Set `PTREE_THREADS="1"` in `/etc/default/ptree-driver` if your scan roots are small and lock contention outweighs parallelism.
 - Adjust `PTREE_ARGS` (default: `--quiet --cache-ttl 0`) for refresh behavior.
@@ -103,48 +118,72 @@ Performance tuning:
 # Basic usage - show current directory tree
 ptree
 
-# Show full drive C:
+# Scan a specific path (supports ~ expansion)
+ptree ~/Desktop/path --max-depth 2 --stats
+
+# Force a full rescan of the default root
+# Windows: selected drive root
+# Unix/Linux: /
 ptree --force
 
 # JSON output with depth limit
-ptree --format json --max-depth 3
+ptree ~/Desktop/path --format json --max-depth 2
+
+# Warm-cache timing check
+# Run twice with the same cache dir; second run should show
+# "Execution Mode: CACHED (< 1 hour)" and "Lazy Load Time"
+ptree ~/Desktop/path --cache-dir /tmp/ptree-demo-cache --max-depth 2 --stats
 
 # Show hidden files
 ptree --hidden
 
-# Display statistics
-ptree --stats
+# Rebuild cache with skip filters and print skip statistics
+ptree ~/Desktop/path --force --skip .git,node_modules --skip-stats
+
+# Update cache without printing the tree
+ptree ~/Desktop/path --quiet --stats
 
 # Setup automatic cache refresh (every 30 minutes)
 ptree --scheduler
 
 # Custom cache location
-ptree --cache-dir "C:\Custom\Path"
+ptree ~/Desktop/path --cache-dir /tmp/ptree-demo-cache
 ```
+
+Notes:
+- `PATH` is positional: use `ptree /some/path`, not `ptree --path /some/path`.
+- `--skip` affects traversal and cache refresh. If you change skip rules on an existing cache, use `--force` or a fresh `--cache-dir`.
 
 ### Command-Line Options
 
 ```
-USAGE:
-    ptree [OPTIONS]
+Usage: ptree [OPTIONS] [PATH]
 
-OPTIONS:
-    -d, --drive <DRIVE>              Drive letter (default: C)
+Arguments:
+    [PATH]                           Optional path to scan (overrides drive); supports ~ expansion
+
+Options:
+    -d, --drive <DRIVE>              Drive letter (e.g. C, D) [default: C]
+    -a, --admin                      Enable admin mode to scan system directories
     -f, --force                      Force full rescan (ignore cache)
-    -a, --admin                      Admin mode (scan system directories)
-    --cache-ttl <SECONDS>            Cache time-to-live (default: 3600)
-    --cache-dir <DIR>                Custom cache directory
-    --no-cache                       Disable cache entirely
-    -q, --quiet                      Suppress output
-    --format <FORMAT>                Output format: tree or json (default: tree)
-    --color <MODE>                   Color output: auto, always, never (default: auto)
-    -m, --max-depth <DEPTH>          Maximum display depth
-    -j, --threads <COUNT>            Thread count (default: CPU cores * 2)
-    --stats                          Show timing statistics
-    --skip-stats                     Show skipped directory statistics
-    --scheduler                      Install scheduled cache refresh
-    --scheduler-uninstall            Remove scheduled refresh
-    --scheduler-status               Check scheduler status
+        --cache-ttl <CACHE_TTL>      Cache time-to-live in seconds (default: 3600)
+        --cache-dir <CACHE_DIR>      Override cache directory location
+        --no-cache                   Disable cache entirely (scan fresh every time)
+    -q, --quiet                      Suppress tree output (useful when just updating cache)
+        --format <FORMAT>            Output format: tree or json [default: tree]
+        --color <COLOR>              Color output: auto, always, never [default: auto]
+        --size                       Include directory sizes in output
+        --file-count                 Include file count per directory
+    -m, --max-depth <MAX_DEPTH>      Maximum depth to display
+    -s, --skip <SKIP>                Directories to skip (comma-separated)
+        --hidden                     Show hidden files
+    -j, --threads <THREADS>          Maximum worker threads (default: up to 4, or CPU cores with --force)
+        --stats                      Display summary statistics (total dirs, files, timing, cache location)
+        --skip-stats                 Show skip statistics (directories skipped during traversal)
+        --scheduler                  Setup automatic cache refresh every 30 minutes (Windows Task Scheduler / cron)
+        --scheduler-uninstall        Remove scheduled cache updates
+        --scheduler-status           Show scheduler status
+    -h, --help                       Print help
 ```
 
 ## Cache Behavior
@@ -152,10 +191,11 @@ OPTIONS:
 The cache operates on a time-to-live model:
 
 - **First run**: Full disk scan stored in cache
-- **Subsequent runs**: Cache returned if age < TTL (default 1 hour)
+- **Subsequent runs**: Cache returned when age < TTL (default 1 hour) and the live root summary still matches the persisted cache summary
 - **Cache location**: `%APPDATA%\ptree\cache\ptree.dat` (Windows),
   `$XDG_CACHE_HOME/ptree/ptree.dat` or `~/.cache/ptree/ptree.dat` (Linux/Unix)
 - **Cache format**: Rkyv binary with lazy-loading index for O(1) cold start
+- **Cached output path**: Cache hits load the index immediately, then expand only the visible tree from the root. `--stats` reports this work as `Lazy Load Time`.
 - **Force rescan**: Use `--force` flag to bypass cache
 
 ## Performance
@@ -228,9 +268,10 @@ cargo build --release --features scheduler
 ### Unix/Linux
 - Basic traversal and caching
 - Cron scheduler support via `ptree --scheduler`
-- Optional always-on systemd watcher via `bash scripts/install-linux.sh`
+- Optional always-on systemd watcher via `bash scripts/linux/install-linux.sh`
 - No incremental update support
 - Auto-update failures on wake can trigger a one-time egui permission prompt
+- Scans outside your home directory require root (`sudo ptree` when scanning /, /opt, etc.)
 
 ## Future Work
 

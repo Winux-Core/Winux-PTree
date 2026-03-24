@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -11,25 +11,32 @@ use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use crate::cache::USNJournalState;
 
+/// Compute depth of a path (number of separators)
+fn compute_depth(path: &Path) -> u32 {
+    path.components().count() as u32
+}
+
 /// Serializable directory entry (serde-based for compatibility)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RkyvDirEntry {
-    pub path:           PathBuf,
-    pub name:           String,
-    pub modified:       DateTime<Utc>,
-    pub content_hash:   u64, // NEW FIELD - Merkle tree hash
-    pub children:       Vec<String>,
-    pub symlink_target: Option<PathBuf>,
-    pub is_hidden:      bool,
-    pub is_dir:         bool,
+    pub path:         PathBuf,
+    pub name:         String,
+    pub modified:     DateTime<Utc>,
+    pub content_hash: u64, // NEW FIELD - Merkle tree hash
+    pub file_count:   usize,
+    pub total_size:   u64,
+    pub children:     Vec<String>,
+    pub is_hidden:    bool,
+    pub is_dir:       bool,
 }
 
 /// Serializable cache index (serde-based for compatibility)
-/// Maps paths → byte offsets, serialized separately for O(1) access
+/// Maps paths → (depth, offset) for depth-split file access
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RkyvCacheIndex {
-    /// Offsets mapping for lazy single-node O(1) access
-    pub offsets:           HashMap<PathBuf, u64>,
+    /// Offsets mapping: (path, depth, offset) for lazy depth-aware access
+    pub offsets:           HashMap<PathBuf, (u32, u64)>,
+    pub total_files:       usize,
     pub last_scan:         DateTime<Utc>,
     pub root:              PathBuf,
     pub last_scanned_root: PathBuf,
@@ -42,6 +49,7 @@ impl RkyvCacheIndex {
     pub fn new() -> Self {
         RkyvCacheIndex {
             offsets:                   HashMap::new(),
+            total_files:               0,
             last_scan:                 Utc::now(),
             root:                      PathBuf::new(),
             last_scanned_root:         PathBuf::new(),
@@ -54,20 +62,20 @@ impl RkyvCacheIndex {
 
 /// Memory-mapped cache using rkyv for zero-copy single-node O(1) access
 ///
-/// Architecture:
-/// - index file (.idx): contains RkyvCacheIndex (rkyv serialized)
-/// - data file (.dat): contains rkyv-archived DirEntry objects at indexed offsets
+/// Architecture (depth-split strategy):
+/// - index file (.idx): contains RkyvCacheIndex with (depth, offset) tuples
+/// - data files (ptree-d0.dat, ptree-d1.dat, etc.): split by directory depth
 ///
-/// Single-node access is O(1): load offset from index, deserialize from mmap in-place
+/// Single-node access is O(1): load (depth, offset) from index, access depth-specific mmap
 /// No allocation or copying for field access during traversal
 pub struct RkyvMmapCache {
     pub index: RkyvCacheIndex,
-    mmap:      Option<Mmap>,
-    data_path: PathBuf,
+    mmaps:     Vec<Option<Mmap>>,
+    base_path: PathBuf,
 }
 
 impl RkyvMmapCache {
-    /// Load cache from rkyv-serialized index and data files
+    /// Load cache from index and depth-split data files
     /// Index is fully deserialized (small), data is mmap'd (large, lazy access)
     pub fn open(index_path: &std::path::Path, data_path: &std::path::Path) -> Result<Self> {
         fs::create_dir_all(index_path.parent().unwrap())?;
@@ -79,38 +87,93 @@ impl RkyvMmapCache {
             file.read_to_end(&mut data)?;
 
             // Deserialize index using serde bincode
-            match bincode::deserialize::<RkyvCacheIndex>(&data) {
-                Ok(idx) => idx,
-                Err(_) => RkyvCacheIndex::new(),
-            }
+            bincode::deserialize::<RkyvCacheIndex>(&data)
+                .map_err(|e| anyhow::anyhow!("failed to deserialize cache index: {e}"))?
         } else {
             RkyvCacheIndex::new()
         };
 
-        // Map data file (large, accessed lazily via O(1) offsets)
-        let mmap = if data_path.exists() {
-            let file = File::open(data_path)?;
-            Some(unsafe { Mmap::map(&file)? })
-        } else {
-            None
-        };
+        // Load depth-split data files (ptree-d0.dat, ptree-d1.dat, etc.)
+        // Support up to depth 30 (typical filesystem is 5-10 levels deep)
+        let mut mmaps = Vec::with_capacity(31);
+        for depth in 0..31 {
+            let depth_file = Self::depth_file_path(data_path, depth);
+            let mmap = if depth_file.exists() {
+                match File::open(&depth_file) {
+                    Ok(file) => {
+                        match unsafe { Mmap::map(&file) } {
+                            Ok(m) => Some(m),
+                            Err(_) => None,
+                        }
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+            mmaps.push(mmap);
+        }
+
+        Self::validate_index_offsets(&index, &mmaps, data_path)?;
 
         Ok(RkyvMmapCache {
             index,
-            mmap,
-            data_path: data_path.to_path_buf(),
+            mmaps,
+            base_path: data_path.to_path_buf(),
         })
     }
 
-    /// O(1) lookup: get single directory entry via mmap offset
-    /// Deserializes from mmap-backed binary data
+    /// Generate depth-split data file path
+    fn depth_file_path(base_path: &Path, depth: u32) -> PathBuf {
+        let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("ptree");
+        let parent = base_path.parent().unwrap_or_else(|| Path::new("."));
+        parent.join(format!("{}-d{}.dat", stem, depth))
+    }
+
+    fn validate_index_offsets(index: &RkyvCacheIndex, mmaps: &[Option<Mmap>], data_path: &Path) -> Result<()> {
+        for (path, (depth, offset)) in &index.offsets {
+            if *depth >= 31 {
+                anyhow::bail!("indexed depth {} for {} exceeds supported maximum", depth, path.display());
+            }
+
+            let Some(mmap) = mmaps[*depth as usize].as_ref() else {
+                anyhow::bail!(
+                    "missing cache shard {} for indexed path {}",
+                    Self::depth_file_path(data_path, *depth).display(),
+                    path.display()
+                );
+            };
+
+            let offset = *offset as usize;
+            if offset + 4 > mmap.len() {
+                anyhow::bail!("offset out of bounds for {}", path.display());
+            }
+
+            let len = u32::from_le_bytes([mmap[offset], mmap[offset + 1], mmap[offset + 2], mmap[offset + 3]]) as usize;
+
+            if offset + 4 + len > mmap.len() {
+                anyhow::bail!("truncated cache record for {}", path.display());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// O(1) lookup: get single directory entry via depth-specific mmap offset
+    /// Deserializes from depth-split mmap'd region
     pub fn get_entry(&self, path: &std::path::Path) -> Result<Option<RkyvDirEntry>> {
-        let offset = match self.index.offsets.get(path) {
-            Some(&off) => off,
+        let (depth, offset) = match self.index.offsets.get(path) {
+            Some((d, o)) => (*d, *o),
             None => return Ok(None),
         };
 
-        let mmap = self.mmap.as_ref().ok_or_else(|| anyhow::anyhow!("No mmap loaded"))?;
+        // Get mmap for this depth (0-30)
+        if depth >= 31 {
+            return Err(anyhow::anyhow!("Path depth {} exceeds maximum of 30", depth));
+        }
+        let mmap = self.mmaps[depth as usize]
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No mmap loaded for depth {}", depth))?;
 
         let data_slice = &mmap[offset as usize..];
 
@@ -140,14 +203,15 @@ impl RkyvMmapCache {
                 entries.insert(
                     entry.path.clone(),
                     crate::cache::DirEntry {
-                        path:           entry.path,
-                        name:           entry.name,
-                        modified:       entry.modified,
-                        content_hash:   entry.content_hash,
-                        children:       entry.children,
-                        symlink_target: entry.symlink_target,
-                        is_hidden:      entry.is_hidden,
-                        is_dir:         entry.is_dir,
+                        path:         entry.path,
+                        name:         entry.name,
+                        modified:     entry.modified,
+                        content_hash: entry.content_hash,
+                        file_count:   entry.file_count,
+                        total_size:   entry.total_size,
+                        children:     entry.children,
+                        is_hidden:    entry.is_hidden,
+                        is_dir:       entry.is_dir,
                     },
                 );
             }
@@ -156,13 +220,19 @@ impl RkyvMmapCache {
         Ok(entries)
     }
 
-    /// Write bincode-serialized entry to data file
-    /// Returns the offset where entry was written for index tracking
-    pub fn append_entry(&self, entry: &RkyvDirEntry) -> Result<u64> {
+    /// Add entry to index and append to depth-split data file
+    /// Returns offset for bookkeeping
+    pub fn append_entry(&mut self, entry: &RkyvDirEntry) -> Result<(u32, u64)> {
+        let depth = compute_depth(&entry.path);
+        if depth >= 31 {
+            anyhow::bail!("Path depth {} exceeds maximum of 30", depth);
+        }
+
+        let depth_file = Self::depth_file_path(&self.base_path, depth);
         let mut data_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.data_path)?;
+            .open(&depth_file)?;
 
         let serialized = bincode::serialize(entry)?;
         let len = serialized.len() as u32;
@@ -173,7 +243,10 @@ impl RkyvMmapCache {
         data_file.write_all(&serialized)?;
         data_file.sync_all()?;
 
-        Ok(offset)
+        // Update index with (depth, offset)
+        self.index.offsets.insert(entry.path.clone(), (depth, offset));
+
+        Ok((depth, offset))
     }
 
     /// Save index to disk (bincode serialized)
@@ -207,14 +280,15 @@ mod tests {
     #[test]
     fn test_rkyv_dir_entry_serialization() -> Result<()> {
         let entry = RkyvDirEntry {
-            path:           PathBuf::from("C:\\test"),
-            name:           "test".to_string(),
-            modified:       Utc::now(),
-            content_hash:   12345u64,
-            children:       vec!["child1".to_string(), "child2".to_string()],
-            symlink_target: None,
-            is_hidden:      false,
-            is_dir:         true,
+            path:         PathBuf::from("C:\\test"),
+            name:         "test".to_string(),
+            modified:     Utc::now(),
+            content_hash: 12345u64,
+            file_count:   2,
+            total_size:   4096,
+            children:     vec!["child1".to_string(), "child2".to_string()],
+            is_hidden:    false,
+            is_dir:       true,
         };
 
         let serialized = bincode::serialize(&entry)?;

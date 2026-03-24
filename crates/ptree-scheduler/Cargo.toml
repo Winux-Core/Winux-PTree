@@ -6,3 +6,9 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+ptree-scheduler-windows = { path = "../ptree-scheduler-windows" }
+
+[target.'cfg(unix)'.dependencies]
+ptree-scheduler-unix = { path = "../ptree-scheduler-unix" }

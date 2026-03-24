@@ -127,7 +127,6 @@ impl LazyCache {
             modified: rkyv_entry.modified,
             content_hash: rkyv_entry.content_hash,
             children: rkyv_entry.children,
-            symlink_target: rkyv_entry.symlink_target,
             is_hidden: rkyv_entry.is_hidden,
             is_dir: rkyv_entry.is_dir,
         };
@@ -181,7 +180,6 @@ impl LazyCache {
             modified: entry.modified,
             content_hash: entry.content_hash,
             children: entry.children.clone(),
-            symlink_target: entry.symlink_target.clone(),
             is_hidden: entry.is_hidden,
             is_dir: entry.is_dir,
         };
@@ -294,7 +292,6 @@ mod tests {
             modified: Utc::now(),
             content_hash: 12345,
             children: vec!["child1".to_string()],
-            symlink_target: None,
             is_hidden: false,
             is_dir: true,
         };

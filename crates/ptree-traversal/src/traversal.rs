@@ -7,21 +7,28 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use chrono::Utc;
 use parking_lot::RwLock;
-use ptree_cache::{DirEntry, DiskCache};
+use ptree_cache::{compute_content_hash, DirEntry, DiskCache};
 use ptree_core::Args;
+use ptree_incremental::{build_changed_directory_set, IncrementalChange};
+
+fn system_time_to_utc(time: std::time::SystemTime) -> chrono::DateTime<Utc> {
+    chrono::DateTime::<Utc>::from(time)
+}
 
 /// Debug timing information and statistics
 #[derive(Debug, Clone)]
 pub struct DebugInfo {
-    pub is_first_run:     bool,
-    pub scan_root:        PathBuf,
-    pub cache_used:       bool,
-    pub traversal_time:   Duration,
-    pub save_time:        Duration,
-    pub cache_index_time: Duration,
-    pub total_dirs:       usize,
-    pub total_files:      usize,
-    pub threads_used:     usize,
+    pub is_first_run:        bool,
+    pub incremental_refresh: bool,
+    pub scan_root:           PathBuf,
+    pub cache_used:          bool,
+    pub lazy_load_time:      Duration,
+    pub traversal_time:      Duration,
+    pub save_time:           Duration,
+    pub cache_index_time:    Duration,
+    pub total_dirs:          usize,
+    pub total_files:         usize,
+    pub threads_used:        usize,
 }
 
 /// Shared state for parallel DFS traversal across worker threads
@@ -40,10 +47,16 @@ pub struct TraversalState {
 
     /// Directories that changed since last scan (for incremental updates)
     /// If set, only these directories will be rescanned; unset means full scan
-    pub changed_dirs_filter: Option<std::collections::HashSet<String>>,
+    pub changed_dirs_filter: Option<std::collections::HashSet<PathBuf>>,
 
     /// Skip statistics: count of skipped directories (shared across threads)
     pub skip_stats: Arc<Mutex<std::collections::HashMap<String, usize>>>,
+}
+
+struct LiveDirectorySummary {
+    content_hash: u64,
+    file_count:   usize,
+    total_size:   u64,
 }
 
 /// Traverse disk and update cache (per README spec)
@@ -72,29 +85,34 @@ pub struct TraversalState {
 /// 7. Spawn worker threads that process queue in parallel (iterative DFS)
 /// 8. Flush all pending writes and save cache atomically
 pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args, cache_path: &Path) -> Result<DebugInfo> {
+    traverse_disk_with_filter(drive, cache, args, cache_path, None)
+}
+
+pub fn traverse_disk_incremental(
+    drive: &char,
+    cache: &mut DiskCache,
+    args: &Args,
+    cache_path: &Path,
+    changes: &[IncrementalChange],
+) -> Result<DebugInfo> {
+    let scan_root = resolve_scan_root(drive, args)?;
+    let changed_dirs = build_changed_directory_set(&scan_root, changes);
+    traverse_disk_with_filter(drive, cache, args, cache_path, Some(changed_dirs))
+}
+
+fn traverse_disk_with_filter(
+    drive: &char,
+    cache: &mut DiskCache,
+    args: &Args,
+    cache_path: &Path,
+    changed_dirs_filter: Option<std::collections::HashSet<PathBuf>>,
+) -> Result<DebugInfo> {
     #[cfg(not(windows))]
     let _ = drive;
 
-    // Determine scan root: current directory by default, full drive with --force
-    let scan_root = if args.force {
-        // --force: scan full filesystem root for the current platform
-        #[cfg(windows)]
-        {
-            let root = PathBuf::from(format!("{}:\\", drive));
-            if !root.exists() {
-                anyhow::bail!("Drive {} does not exist", drive);
-            }
-            root
-        }
-
-        #[cfg(not(windows))]
-        {
-            PathBuf::from("/")
-        }
-    } else {
-        // Default: scan current directory and subdirectories
-        std::env::current_dir()?
-    };
+    let incremental_refresh = changed_dirs_filter.is_some();
+    let scan_root = resolve_scan_root(drive, args)?;
+    let skip_dirs = args.skip_dirs();
 
     // Verify scan root exists and is a directory
     if !scan_root.exists() {
@@ -110,17 +128,21 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args, cache_pat
     // Ensure root directory is added to cache (important for --no-cache mode)
     if is_first_run && !cache.entries.contains_key(&scan_root) {
         let root_entry = DirEntry {
-            path:           scan_root.clone(),
-            name:           scan_root
+            path:         scan_root.clone(),
+            name:         scan_root
                 .file_name()
                 .and_then(|n| n.to_str().map(|s| s.to_string()))
                 .unwrap_or_default(),
-            modified:       Utc::now(),
-            content_hash:   0,
-            children:       Vec::new(),
-            symlink_target: None,
-            is_hidden:      false,
-            is_dir:         true,
+            modified:     fs::metadata(&scan_root)
+                .and_then(|metadata| metadata.modified())
+                .map(system_time_to_utc)
+                .unwrap_or_else(|_| Utc::now()),
+            content_hash: 0,
+            file_count:   0,
+            total_size:   0,
+            children:     Vec::new(),
+            is_hidden:    false,
+            is_dir:       true,
         };
         cache.entries.insert(scan_root.clone(), root_entry);
     }
@@ -135,41 +157,36 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args, cache_pat
         false // --no-cache always triggers rescan
     } else if args.force {
         false // --force always triggers rescan
+    } else if incremental_refresh {
+        false // Incremental refresh must rescan affected directories immediately
     } else if is_first_run {
         false // First run always scans
     } else {
         // Check cache freshness rule (time-based only)
         let now = Utc::now();
         let age = now.signed_duration_since(cache.last_scan);
-        age.num_seconds() < cache_ttl_seconds as i64
+        if age.num_seconds() >= cache_ttl_seconds as i64 {
+            false
+        } else {
+            cache_matches_live_state(cache, cache_path, &scan_root, &skip_dirs)?
+        }
     };
 
     if should_use_cache {
-        let total_files = if cache.entries.is_empty() {
-            0
-        } else {
-            cache.entries.values().map(|e| e.children.len()).sum()
-        };
         return Ok(DebugInfo {
-            is_first_run: false,
-            scan_root: cache.root.clone(),
-            cache_used: true,
-            traversal_time: Duration::from_secs(0),
-            save_time: Duration::from_secs(0),
-            cache_index_time: Duration::from_secs(0),
-            total_dirs: cache.entry_count_hint(),
-            total_files,
-            threads_used: 0,
+            is_first_run:        false,
+            incremental_refresh: false,
+            scan_root:           cache.root.clone(),
+            cache_used:          true,
+            lazy_load_time:      Duration::ZERO,
+            traversal_time:      Duration::from_secs(0),
+            save_time:           Duration::from_secs(0),
+            cache_index_time:    Duration::from_secs(0),
+            total_dirs:          cache.entry_count_hint(),
+            total_files:         cache.file_count_hint(),
+            threads_used:        0,
         });
     }
-
-    // ============================================================================
-    // Prepare for Traversal
-    // ============================================================================
-
-    // Incremental directory filtering is currently disabled.
-    // Traversal always performs full DFS for refresh runs.
-    let changed_dirs_filter: Option<std::collections::HashSet<String>> = None;
 
     // ============================================================================
     // Initialize Traversal State
@@ -182,7 +199,7 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args, cache_pat
         work_queue: Arc::new(Mutex::new(work_queue)),
         cache: Arc::new(RwLock::new(cache.clone())),
         in_progress: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        skip_dirs: args.skip_dirs(),
+        skip_dirs: skip_dirs.clone(),
         changed_dirs_filter,
         skip_stats: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
@@ -243,6 +260,7 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args, cache_pat
 
     // Flush any remaining pending writes before saving
     final_cache.flush_pending_writes();
+    final_cache.refresh_derived_metadata();
 
     let cache_index_start = Instant::now();
 
@@ -271,12 +289,18 @@ pub fn traverse_disk(drive: &char, cache: &mut DiskCache, args: &Args, cache_pat
     // Return Debug Info
     // ============================================================================
 
-    let total_files = cache.entries.values().map(|e| e.children.len()).sum();
+    let total_files = cache
+        .entries
+        .get(&cache.root)
+        .map(|entry| entry.file_count)
+        .unwrap_or_else(|| cache.file_count_hint());
 
     Ok(DebugInfo {
         is_first_run,
+        incremental_refresh,
         scan_root: cache.root.clone(),
         cache_used: false,
+        lazy_load_time: Duration::ZERO,
         traversal_time: traversal_elapsed,
         save_time: save_elapsed,
         cache_index_time: cache_index_elapsed,
@@ -299,7 +323,7 @@ fn dfs_worker(
     cache: &Arc<RwLock<DiskCache>>,
     skip_dirs: &std::collections::HashSet<String>,
     in_progress: &Arc<Mutex<std::collections::HashSet<PathBuf>>>,
-    changed_dirs_filter: &Option<std::collections::HashSet<String>>,
+    changed_dirs_filter: &Option<std::collections::HashSet<PathBuf>>,
     scan_root: &PathBuf,
     skip_stats: &Arc<Mutex<std::collections::HashMap<String, usize>>>,
 ) {
@@ -367,9 +391,8 @@ fn dfs_worker(
                 // ============================================================
 
                 let should_process = if let Some(filter) = changed_dirs_filter {
-                    // Incremental mode: only process if this directory changed
-                    let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    filter.contains(dir_name) || path == *scan_root
+                    // Incremental mode: only process directories in the exact affected path set
+                    filter.contains(&path) || path == *scan_root
                 } else {
                     // Full scan mode: process all directories
                     true
@@ -382,10 +405,10 @@ fn dfs_worker(
 
                     if let Ok(entries) = fs::read_dir(&path) {
                         let mut children = Vec::new();
-                        let mut child_entries = Vec::new();
                         let mut child_dirs_to_queue = Vec::new();
-                        let mut child_files_to_cache = Vec::new();
                         let mut skipped = Vec::new(); // Batch skipped directories
+                        let mut direct_file_count = 0usize;
+                        let mut direct_file_size = 0u64;
 
                         for entry_result in entries {
                             if let Ok(entry) = entry_result {
@@ -406,22 +429,24 @@ fn dfs_worker(
                                 match entry.file_type() {
                                     Ok(ft) if ft.is_dir() => {
                                         // Queue directories for processing
-                                        child_dirs_to_queue.push(child_path.clone());
-                                        // Also add to cache for file listing
-                                        if !child_files_to_cache.iter().any(|p| p == &child_path) {
-                                            child_files_to_cache.push(child_path);
+                                        let should_queue = changed_dirs_filter
+                                            .as_ref()
+                                            .map(|filter| filter.contains(&child_path))
+                                            .unwrap_or(true);
+                                        if should_queue {
+                                            child_dirs_to_queue.push(child_path.clone());
                                         }
                                     }
                                     Ok(ft) if ft.is_symlink() => {
-                                        // Capture symlink target - add to both queues if it's a dir symlink
-                                        let target = fs::read_link(&child_path).ok();
-                                        child_entries.push((file_name_str.to_string(), target));
-                                        child_files_to_cache.push(child_path.clone());
-                                        // Don't queue symlinks for traversal - they would cause loops
+                                        // Symlinks are recorded as names only; we don't traverse them.
+                                        direct_file_count += 1;
                                     }
                                     Ok(_) => {
-                                        // Regular file: add to cache but don't queue for traversal
-                                        child_files_to_cache.push(child_path);
+                                        // Regular file: recorded in `children`; no cache insert needed.
+                                        direct_file_count += 1;
+                                        if let Ok(metadata) = entry.metadata() {
+                                            direct_file_size += metadata.len();
+                                        }
                                     }
                                     _ => {} // Couldn't get file type, skip
                                 }
@@ -440,34 +465,9 @@ fn dfs_worker(
 
                         // ========================================================
                         // Buffer file entries (thread-local, flush periodically)
-                        // Reduces cache.write() lock acquisitions dramatically
+                        // (directory entries only; file names live inside `children`)
                         // ========================================================
-                        for file_path in child_files_to_cache {
-                            let file_entry = DirEntry {
-                                path:           file_path.clone(),
-                                name:           file_path
-                                    .file_name()
-                                    .and_then(|n| n.to_str().map(|s| s.to_string()))
-                                    .unwrap_or_default(),
-                                modified:       Utc::now(),
-                                content_hash:   0,
-                                children:       Vec::new(),
-                                symlink_target: None,
-                                is_hidden:      false,
-                                is_dir:         false,
-                            };
-                            entry_buffer.push((file_path, file_entry));
 
-                            // Flush if threshold reached
-                            if entry_buffer.len() >= flush_threshold {
-                                let mut cache_guard = cache.write();
-                                for (p, e) in entry_buffer.drain(..) {
-                                    cache_guard.add_entry(p, e);
-                                }
-                            }
-                        }
-
-                        // ========================================================
                         // Buffer skip statistics (thread-local, flush on exit)
                         // ========================================================
                         for skip_name in skipped {
@@ -501,16 +501,24 @@ fn dfs_worker(
                             }
                         };
 
+                        let mut cache_guard = cache.write();
+                        cache_guard.remove_missing_child_subtrees(&path, &children);
+                        drop(cache_guard);
+
                         let dir_entry = DirEntry {
                             path: path.clone(),
                             name: path
                                 .file_name()
                                 .and_then(|n| n.to_str().map(|s| s.to_string()))
                                 .unwrap_or_default(),
-                            modified: Utc::now(),
+                            modified: fs::metadata(&path)
+                                .and_then(|metadata| metadata.modified())
+                                .map(system_time_to_utc)
+                                .unwrap_or_else(|_| Utc::now()),
                             content_hash: 0,
+                            file_count: direct_file_count,
+                            total_size: direct_file_size,
                             children,
-                            symlink_target: None,
                             is_hidden,
                             is_dir: true,
                         };
@@ -553,11 +561,181 @@ fn should_skip(name: &str, skip_dirs: &std::collections::HashSet<String>) -> boo
     skip_dirs.iter().any(|skip| name.eq_ignore_ascii_case(skip))
 }
 
+fn cache_matches_live_state(
+    cache: &mut DiskCache,
+    cache_path: &Path,
+    scan_root: &Path,
+    skip_dirs: &std::collections::HashSet<String>,
+) -> Result<bool> {
+    if !cache.entries.contains_key(scan_root) {
+        cache.load_entries_lazy(&[scan_root.to_path_buf()], cache_path)?;
+    }
+
+    let Some(root_entry) = cache.get_entry(scan_root) else {
+        return Ok(false);
+    };
+
+    let live = summarize_live_directory(scan_root, skip_dirs)?;
+    Ok(root_entry.content_hash == live.content_hash
+        && root_entry.file_count == live.file_count
+        && root_entry.total_size == live.total_size)
+}
+
+fn summarize_live_directory(
+    path: &Path,
+    skip_dirs: &std::collections::HashSet<String>,
+) -> Result<LiveDirectorySummary> {
+    let modified = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map(system_time_to_utc)
+        .unwrap_or_else(|_| Utc::now());
+
+    let mut children = Vec::new();
+    let mut child_hashes = std::collections::HashMap::new();
+    let mut file_count = 0usize;
+    let mut total_size = 0u64;
+
+    for entry_result in fs::read_dir(path)? {
+        let entry = entry_result?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if should_skip(&name, skip_dirs) {
+            continue;
+        }
+
+        children.push(name.clone());
+        let child_path = entry.path();
+        match entry.file_type() {
+            Ok(ft) if ft.is_dir() => {
+                let child = summarize_live_directory(&child_path, skip_dirs)?;
+                file_count += child.file_count;
+                total_size += child.total_size;
+                child_hashes.insert(child_path, child.content_hash);
+            }
+            Ok(ft) if ft.is_symlink() => {
+                file_count += 1;
+            }
+            Ok(_) => {
+                file_count += 1;
+                if let Ok(metadata) = entry.metadata() {
+                    total_size += metadata.len();
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    let content_hash = compute_content_hash(path, modified, &children, &child_hashes);
+    Ok(LiveDirectorySummary {
+        content_hash,
+        file_count,
+        total_size,
+    })
+}
+
+/// Expand leading '~' into the user's home directory. If expansion fails,
+/// returns the original path.
+fn expand_tilde(path: &PathBuf) -> Result<PathBuf> {
+    use std::env;
+
+    if let Some(raw) = path.to_str() {
+        if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
+            let home = {
+                #[cfg(windows)]
+                {
+                    env::var("USERPROFILE").or_else(|_| {
+                        let drive = env::var("HOMEDRIVE")?;
+                        let path = env::var("HOMEPATH")?;
+                        Ok(format!("{}{}", drive, path))
+                    })
+                }
+                #[cfg(not(windows))]
+                {
+                    env::var("HOME")
+                }
+            };
+
+            if let Ok(home_dir) = home {
+                let mut expanded = PathBuf::from(home_dir);
+                if raw.len() > 1 {
+                    expanded.push(&raw[2..]); // strip "~/"
+                }
+                return Ok(expanded);
+            }
+        }
+    }
+
+    Ok(path.clone())
+}
+
+fn resolve_scan_root(drive: &char, args: &Args) -> Result<PathBuf> {
+    #[cfg(not(windows))]
+    let _ = drive;
+
+    // Determine scan root precedence:
+    // 1) Explicit path argument (supports ~ expansion)
+    // 2) --force => full filesystem root
+    // 3) Default => current working directory
+    if let Some(p) = &args.path {
+        expand_tilde(p)
+    } else if args.force {
+        #[cfg(windows)]
+        {
+            let root = PathBuf::from(format!("{}:\\", drive));
+            if !root.exists() {
+                anyhow::bail!("Drive {} does not exist", drive);
+            }
+            Ok(root)
+        }
+
+        #[cfg(not(windows))]
+        {
+            Ok(PathBuf::from("/"))
+        }
+    } else {
+        Ok(std::env::current_dir()?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use ptree_core::{ColorMode, OutputFormat};
+    use ptree_incremental::IncrementalChange;
+
     use super::*;
 
-    #[cfg(windows)]
+    fn test_root(name: &str) -> PathBuf {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("ptree_traversal_{name}_{unique}"))
+    }
+
+    fn test_args(path: PathBuf) -> Args {
+        Args {
+            path:                Some(path),
+            drive:               'C',
+            admin:               false,
+            force:               false,
+            cache_ttl:           None,
+            cache_dir:           None,
+            no_cache:            true,
+            quiet:               true,
+            format:              OutputFormat::Tree,
+            color:               ColorMode::Never,
+            size:                false,
+            file_count:          false,
+            max_depth:           None,
+            skip:                None,
+            hidden:              false,
+            threads:             Some(1),
+            stats:               false,
+            skip_stats:          false,
+            scheduler:           false,
+            scheduler_uninstall: false,
+            scheduler_status:    false,
+        }
+    }
+
     #[test]
     fn test_should_skip() {
         let mut skip = std::collections::HashSet::new();
@@ -567,5 +745,90 @@ mod tests {
         assert!(should_skip("System32", &skip));
         assert!(should_skip(".git", &skip));
         assert!(!should_skip("Documents", &skip));
+    }
+
+    #[test]
+    fn incremental_refresh_targets_full_paths_and_prunes_stale_subtrees() -> Result<()> {
+        let root = test_root("incremental_filter");
+        let left_shared = root.join("left").join("shared").join("old_left");
+        let right_shared = root.join("right").join("shared").join("old_right");
+        fs::create_dir_all(&left_shared)?;
+        fs::create_dir_all(&right_shared)?;
+
+        let args = test_args(root.clone());
+        let cache_path = root.join("cache").join("ptree.dat");
+        let mut cache = DiskCache::open(&cache_path)?;
+
+        traverse_disk(&'C', &mut cache, &args, &cache_path)?;
+        assert!(cache
+            .entries
+            .contains_key(&root.join("left").join("shared").join("old_left")));
+        assert!(cache
+            .entries
+            .contains_key(&root.join("right").join("shared").join("old_right")));
+
+        fs::remove_dir_all(root.join("left").join("shared").join("old_left"))?;
+        fs::create_dir_all(root.join("left").join("shared").join("fresh_left"))?;
+        fs::remove_dir_all(root.join("right").join("shared").join("old_right"))?;
+        fs::create_dir_all(root.join("right").join("shared").join("fresh_right"))?;
+
+        let changes = vec![
+            IncrementalChange::deleted(root.join("left").join("shared").join("old_left"), true),
+            IncrementalChange::created(root.join("left").join("shared").join("fresh_left"), true),
+        ];
+
+        let debug = traverse_disk_incremental(&'C', &mut cache, &args, &cache_path, &changes)?;
+
+        assert!(debug.incremental_refresh);
+        assert!(cache
+            .entries
+            .contains_key(&root.join("left").join("shared").join("fresh_left")));
+        assert!(!cache
+            .entries
+            .contains_key(&root.join("left").join("shared").join("old_left")));
+        assert!(cache
+            .entries
+            .contains_key(&root.join("right").join("shared").join("old_right")));
+        assert!(!cache
+            .entries
+            .contains_key(&root.join("right").join("shared").join("fresh_right")));
+
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn warm_cache_revalidates_live_state_before_reuse() -> Result<()> {
+        let root = test_root("warm_cache_validation");
+        let nested = root.join("alpha");
+        fs::create_dir_all(&nested)?;
+        fs::write(nested.join("leaf.txt"), b"one")?;
+
+        let mut args = test_args(root.clone());
+        args.no_cache = false;
+        args.cache_ttl = Some(3600);
+        let cache_path = std::env::temp_dir().join("ptree_test_cache_validation").join(format!(
+            "ptree-{}.dat",
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut cache = DiskCache::open(&cache_path)?;
+
+        let first = traverse_disk(&'C', &mut cache, &args, &cache_path)?;
+        assert!(!first.cache_used);
+
+        let warm = traverse_disk(&'C', &mut cache, &args, &cache_path)?;
+        assert!(warm.cache_used);
+
+        fs::write(nested.join("leaf.txt"), b"updated-and-larger")?;
+
+        let invalidated = traverse_disk(&'C', &mut cache, &args, &cache_path)?;
+        assert!(!invalidated.cache_used);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(cache_path.parent().unwrap_or(&cache_path));
+        Ok(())
     }
 }

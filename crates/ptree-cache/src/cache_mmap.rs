@@ -6,14 +6,21 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use anyhow::{Result, anyhow};
 use memmap2::Mmap;
+use rkyv::Deserialize as RkyvDeserialize;
 
 use crate::cache::DirEntry;
 
-/// Lightweight index mapping path offsets to byte positions in the mmap'd data file
+/// Compute depth of a path (number of separators)
+fn compute_depth(path: &Path) -> u32 {
+    path.components().count() as u32
+}
+
+/// Lightweight index mapping path offsets to byte positions in depth-split data files
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(target_arch = "x86_64", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
 pub struct CacheIndex {
-    /// Map of PathBuf to byte offset in the data file
-    pub offsets: HashMap<PathBuf, u64>,
+     /// Sorted Vec of (PathBuf, depth, offset) for O(log n) lookup across split files
+     pub offsets: Vec<(PathBuf, u32, u64)>,
     
     /// Last scan timestamp
     pub last_scan: DateTime<Utc>,
@@ -33,12 +40,12 @@ pub struct CacheIndex {
 }
 
 impl CacheIndex {
-    pub fn new() -> Self {
-        CacheIndex {
-            offsets: HashMap::new(),
-            last_scan: Utc::now(),
-            root: PathBuf::new(),
-            last_scanned_root: PathBuf::new(),
+     pub fn new() -> Self {
+         CacheIndex {
+             offsets: Vec::new(),
+             last_scan: Utc::now(),
+             root: PathBuf::new(),
+             last_scanned_root: PathBuf::new(),
             #[cfg(windows)]
             usn_state: USNJournalState::default(),
             skip_stats: HashMap::new(),
@@ -52,60 +59,110 @@ impl CacheIndex {
 /// - index file: contains CacheIndex (paths → offsets)
 /// - data file: contains serialized DirEntry objects at indexed offsets
 pub struct MmapCache {
-    /// Index mapping paths to byte offsets
-    pub index: CacheIndex,
-    
-    /// Memory-mapped data file
-    mmap: Option<Mmap>,
-    
-    /// Path to the data file (for lazy-loading entries)
-    data_path: PathBuf,
-    
-    /// Buffer for pending writes before flush
-    pub pending_writes: Vec<(PathBuf, DirEntry)>,
-    
-    /// Flush threshold
-    pub flush_threshold: usize,
+     /// Index mapping paths to (depth, offsets)
+     pub index: CacheIndex,
+     
+     /// Memory-mapped data files, indexed by depth (0-30)
+     mmaps: Vec<Option<Mmap>>,
+     
+     /// Base path for data files
+     base_path: PathBuf,
+     
+     /// Buffer for pending writes before flush
+     pub pending_writes: Vec<(PathBuf, DirEntry)>,
+     
+     /// Flush threshold
+     pub flush_threshold: usize,
 }
 
 impl MmapCache {
-    /// Load cache from index and data files
-    pub fn open(index_path: &Path, data_path: &Path) -> Result<Self> {
-        fs::create_dir_all(index_path.parent().unwrap())?;
-        
-        let index = if index_path.exists() {
-            let mut file = File::open(index_path)?;
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
-            bincode::deserialize(&data).unwrap_or_else(|_| CacheIndex::new())
-        } else {
-            CacheIndex::new()
-        };
-        
-        let mmap = if data_path.exists() {
-            let file = File::open(data_path)?;
-            Some(unsafe { Mmap::map(&file)? })
-        } else {
-            None
-        };
-        
-        Ok(MmapCache {
-            index,
-            mmap,
-            data_path: data_path.to_path_buf(),
-            pending_writes: Vec::new(),
-            flush_threshold: 5000,
-        })
-    }
+     /// Load cache from index and data files (depth-split strategy)
+     /// Loads index from index_path, and mmaps all depth-split data files
+     pub fn open(index_path: &Path, data_path: &Path) -> Result<Self> {
+          fs::create_dir_all(index_path.parent().unwrap())?;
+          
+          // Load index via rkyv from mmap (zero-copy)
+          let index = if index_path.exists() {
+              match File::open(index_path) {
+                  Ok(file) => {
+                      match unsafe { Mmap::map(&file) } {
+                          Ok(index_mmap) => {
+                              // Deserialize from mmap with rkyv (zero-copy)
+                              match rkyv::from_bytes::<CacheIndex>(&index_mmap) {
+                                  Ok(idx) => idx,
+                                  Err(_) => {
+                                      // Fallback: read into memory for bincode
+                                      if let Ok(data) = std::fs::read(index_path) {
+                                          bincode::deserialize(&data).unwrap_or_else(|_| CacheIndex::new())
+                                      } else {
+                                          CacheIndex::new()
+                                      }
+                                  }
+                              }
+                          }
+                          Err(_) => CacheIndex::new(),
+                      }
+                  }
+                  Err(_) => CacheIndex::new(),
+              }
+          } else {
+              CacheIndex::new()
+          };
+          
+          // Load depth-split data files (ptree-d0.dat, ptree-d1.dat, etc.)
+          // Support up to depth 30 (typical filesystem is 5-10 levels deep)
+          let mut mmaps = Vec::with_capacity(31);
+          for depth in 0..31 {
+              let depth_file = Self::depth_file_path(data_path, depth);
+              let mmap = if depth_file.exists() {
+                  match File::open(&depth_file) {
+                      Ok(file) => match unsafe { Mmap::map(&file) } {
+                          Ok(m) => Some(m),
+                          Err(_) => None,
+                      },
+                      Err(_) => None,
+                  }
+              } else {
+                  None
+              };
+              mmaps.push(mmap);
+          }
+          
+          Ok(MmapCache {
+              index,
+              mmaps,
+              base_path: data_path.to_path_buf(),
+              pending_writes: Vec::new(),
+              flush_threshold: 5000,
+          })
+      }
+      
+      /// Generate depth-split data file path
+      fn depth_file_path(base_path: &Path, depth: u32) -> PathBuf {
+          let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("ptree");
+          let parent = base_path.parent().unwrap_or_else(|| Path::new("."));
+          parent.join(format!("{}-d{}.dat", stem, depth))
+      }
     
-    /// Get a directory entry by path (deserializes from mmap'd region)
+    /// Get a directory entry by path (deserializes from depth-specific mmap'd region)
     pub fn get(&self, path: &Path) -> Result<Option<DirEntry>> {
-        let offset = match self.index.offsets.get(path) {
-            Some(&off) => off,
-            None => return Ok(None),
+        // Binary search to find (path, depth, offset) in sorted index
+        let (depth, offset) = match self.index.offsets.binary_search_by_key(&path, |(p, _, _)| p) {
+            Ok(idx) => {
+                let (_, d, o) = &self.index.offsets[idx];
+                (*d, *o)
+            },
+            Err(_) => return Ok(None),
         };
         
-        let mmap = self.mmap.as_ref().ok_or_else(|| anyhow!("No mmap loaded"))?;
+        // Get mmap for this depth (0-30)
+        if depth >= 31 {
+            return Err(anyhow!("Path depth exceeds maximum of 30"));
+        }
+        let mmap = self.mmaps[depth as usize]
+            .as_ref()
+            .ok_or_else(|| anyhow!("No mmap loaded for depth {}", depth))?;
+        
         let data_slice = &mmap[offset as usize..];
         
         // Deserialize single entry from this offset
@@ -150,48 +207,78 @@ impl MmapCache {
         }
     }
     
-    /// Flush pending writes to disk
+    /// Flush pending writes to disk (depth-split files)
     pub fn flush_pending_writes(&mut self) -> Result<()> {
         if self.pending_writes.is_empty() {
             return Ok(());
         }
         
-        // Open data file in append mode
-        let mut data_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.data_path)?;
+        // Group writes by depth to minimize file handle juggling
+        let mut writes_by_depth: std::collections::HashMap<u32, Vec<(PathBuf, DirEntry)>> = 
+            std::collections::HashMap::new();
         
         for (path, entry) in self.pending_writes.drain(..) {
-            let serialized = bincode::serialize(&entry)?;
-            let len = serialized.len() as u32;
-            
-            // Record offset before writing
-            let offset = data_file.seek(SeekFrom::End(0))?;
-            self.index.offsets.insert(path, offset);
-            
-            // Write length + data
-            data_file.write_all(&len.to_le_bytes())?;
-            data_file.write_all(&serialized)?;
+            let depth = compute_depth(&path);
+            writes_by_depth.entry(depth).or_insert_with(Vec::new).push((path, entry));
         }
         
-        data_file.sync_all()?;
-        
-        // Reload mmap to include new data
-        if let Ok(file) = File::open(&self.data_path) {
-            self.mmap = Some(unsafe { Mmap::map(&file)? });
+        // Write each depth's entries to its depth-specific file
+        for (depth, entries) in writes_by_depth {
+            if depth >= 31 {
+                anyhow::bail!("Path depth {} exceeds maximum of 30", depth);
+            }
+            
+            let depth_file = Self::depth_file_path(&self.base_path, depth);
+            let mut data_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&depth_file)?;
+            
+            for (path, entry) in entries {
+                let serialized = bincode::serialize(&entry)?;
+                let len = serialized.len() as u32;
+                
+                // Record offset before writing
+                let offset = data_file.seek(SeekFrom::End(0))?;
+                self.index.offsets.push((path.to_path_buf(), depth, offset));
+                
+                // Write length + data
+                data_file.write_all(&len.to_le_bytes())?;
+                data_file.write_all(&serialized)?;
+            }
+            
+            data_file.sync_all()?;
+            
+            // Reload mmap for this depth to include new data
+            if let Ok(file) = File::open(&depth_file) {
+                if let Ok(mmap) = unsafe { Mmap::map(&file) } {
+                    self.mmaps[depth as usize] = Some(mmap);
+                }
+            }
         }
         
         Ok(())
     }
     
-    /// Save index to disk
-    pub fn save_index(&self, path: &Path) -> Result<()> {
-        let data = bincode::serialize(&self.index)?;
-        let temp_path = path.with_extension("tmp");
+    /// Save index to disk using rkyv (fast serialization)
+    /// Sorts offsets by path for binary search (depth is secondary sort key for stability)
+    pub fn save_index(&mut self, path: &Path) -> Result<()> {
+        // Sort offsets by path, then by depth for binary search compatibility
+        // Binary search only uses path, but depth ordering ensures deterministic output
+        self.index.offsets.sort_by(|a, b| {
+            match a.0.cmp(&b.0) {
+                std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+                other => other,
+            }
+        });
         
+        // Use rkyv for fast zero-copy serialization
+        let bytes = rkyv::to_bytes::<_, 256>(&self.index)
+            .map_err(|e| anyhow!("rkyv serialization failed: {}", e))?;
+        
+        let temp_path = path.with_extension("tmp");
         let mut file = File::create(&temp_path)?;
-        file.write_all(&data)?;
+        file.write_all(&bytes)?;
         file.sync_all()?;
         
         fs::rename(&temp_path, path)?;
