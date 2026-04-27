@@ -1,3 +1,5 @@
+> Notice: Support for PTree has been fully dropped. No new updates will occur.
+
 # PTree - High-Performance Disk Tree Visualization
 
 A fast, cache-first disk tree traversal tool for Windows and Unix systems with multi-threaded parallelism and persistent caching.
